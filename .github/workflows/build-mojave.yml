@@ -1,0 +1,74 @@
+name: Build TagoClip for Mojave
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-mojave:
+    # Intel runner; build artifacts are explicitly x86_64 with a 10.14 deployment target.
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Extract prepared source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p source
+          unzip -q TagoClip-1.1.3-Mojave-Source-Prep.zip -d source
+          ROOT="$(find source -type f -path '*/scripts/build_mojave.sh' -print -quit)"
+          if [[ -z "$ROOT" ]]; then
+            echo "Could not find scripts/build_mojave.sh in the source archive" >&2
+            exit 1
+          fi
+          echo "SOURCE_ROOT=$(dirname "$(dirname "$ROOT")")" >> "$GITHUB_ENV"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check toolchain
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          cmake --version
+          git --version
+          node --version
+          npm --version
+
+      - name: Build Intel VST3 and AU for macOS 10.14
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_ROOT"
+          bash scripts/build_mojave.sh
+
+      - name: Package plugin bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_ROOT"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          ditto -c -k --sequesterRsrc --keepParent \
+            build-mojave/TagoClip_artefacts/Release/VST3/TagoClip.vst3 \
+            "$GITHUB_WORKSPACE/dist/TagoClip-VST3-Mojave-Intel.zip"
+          ditto -c -k --sequesterRsrc --keepParent \
+            build-mojave/TagoClip_artefacts/Release/AU/TagoClip.component \
+            "$GITHUB_WORKSPACE/dist/TagoClip-AU-Mojave-Intel.zip"
+
+      - name: Upload compiled plugins
+        uses: actions/upload-artifact@v4
+        with:
+          name: TagoClip-Mojave-Intel-Plugins
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
