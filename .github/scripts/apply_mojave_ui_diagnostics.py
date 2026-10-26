@@ -289,6 +289,43 @@ export default defineConfig({
 })
 """)
 
+# Ensure the actual React root is a fresh native DOM element. The diagnostic
+# log showed React #299 even though the HTML's "root" lookup later succeeded.
+# Replacing the placeholder avoids handing React a stale/non-native container.
+main_tsx = root / "ui/src/main.tsx"
+main_source = main_tsx.read_text(encoding="utf-8")
+old_mount = """createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+)"""
+new_mount = """// Create a fresh native container at startup. This avoids passing a stale or
+// invalid container to ReactDOM.createRoot in the embedded macOS WebView.
+const oldRoot = document.getElementById('root')
+const mountRoot = document.createElement('div')
+mountRoot.id = 'root'
+if (oldRoot && oldRoot.parentNode)
+  oldRoot.parentNode.replaceChild(mountRoot, oldRoot)
+else
+  document.body.appendChild(mountRoot)
+
+console.error('[TagoClip mount probe] originalRoot=' + !!oldRoot
+  + '; originalNodeType=' + (oldRoot && oldRoot.nodeType)
+  + '; newNodeType=' + mountRoot.nodeType
+  + '; bodyNodeType=' + (document.body && document.body.nodeType))
+
+createRoot(mountRoot).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+)"""
+if old_mount not in main_source:
+    if "createRoot(mountRoot).render(" not in main_source:
+        raise SystemExit("Could not locate original React mount call in ui/src/main.tsx")
+else:
+    main_source = main_source.replace(old_mount, new_mount)
+    main_tsx.write_text(main_source, encoding="utf-8")
+
 # Inline the built JS/CSS into index.html to test whether WebKit rejects the
 # external module-script request on JUCE's custom juce:// origin.
 inline_helper = root / "scripts/inline_webui_assets.py"
