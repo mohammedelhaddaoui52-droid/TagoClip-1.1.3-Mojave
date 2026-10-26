@@ -264,4 +264,101 @@ export default defineConfig({
   },
 })
 """)
+
+# Inline the built JS/CSS into index.html to test whether WebKit rejects the
+# external module-script request on JUCE's custom juce:// origin.
+inline_helper = root / "scripts/inline_webui_assets.py"
+inline_helper.write_text(r'''#!/usr/bin/env python3
+"""Inline Vite JS/CSS/font assets into index.html for JUCE WebKit compatibility."""
+from pathlib import Path
+import base64
+import re
+import sys
+
+dist = Path(sys.argv[1]).resolve()
+index_file = dist / "index.html"
+html = index_file.read_text(encoding="utf-8")
+
+def asset_path(url: str, base: Path) -> Path:
+    url = url.split("?", 1)[0].split("#", 1)[0]
+    if url.startswith("/"):
+        return (dist / url.lstrip("/")).resolve()
+    return (base / url).resolve()
+
+script_re = re.compile(
+    r'<script\b(?P<attrs>[^>]*)\bsrc=["\\'](?P<src>[^"\\']+)["\\'][^>]*>\s*</script>',
+    re.I | re.S,
+)
+script_count = 0
+
+def inline_script(match):
+    global script_count
+    tag = match.group(0)
+    if not re.search(r'\btype=["\\']module["\\']', tag, re.I):
+        return tag
+    js_path = asset_path(match.group("src"), dist)
+    if not js_path.is_file():
+        raise SystemExit(f"JavaScript bundle not found: {js_path}")
+    js = js_path.read_text(encoding="utf-8")
+    # Prevent an embedded literal from prematurely closing the HTML script tag.
+    js = re.sub(r"</script", r"<\\/script", js, flags=re.I)
+    script_count += 1
+    return "<script type=\\"module\\">\\n" + js + "\\n</script>"
+
+html = script_re.sub(inline_script, html)
+if script_count != 1:
+    raise SystemExit(f"Expected exactly one external module script, inlined {script_count}")
+
+link_re = re.compile(
+    r'<link\b(?=[^>]*\brel=["\\']stylesheet["\\'])[^>]*\bhref=["\\'](?P<href>[^"\\']+)["\\'][^>]*>',
+    re.I | re.S,
+)
+css_count = 0
+font_pattern = re.compile(r"url\\(\\s*['\\"]?(?P<url>[^)'\\"]+\\.woff2(?:\\?[^)'\\"]*)?)['\\"]?\\s*\\)", re.I)
+
+def inline_css_link(match):
+    global css_count
+    css_path = asset_path(match.group("href"), dist)
+    if not css_path.is_file():
+        raise SystemExit(f"Stylesheet not found: {css_path}")
+    css = css_path.read_text(encoding="utf-8")
+    def inline_font(font_match):
+        font_url = font_match.group("url")
+        if font_url.startswith(("data:", "http://", "https://")):
+            return font_match.group(0)
+        font_path = asset_path(font_url, css_path.parent)
+        if not font_path.is_file():
+            print(f"WARNING: font not found for inline: {font_url}", file=sys.stderr)
+            return font_match.group(0)
+        encoded = base64.b64encode(font_path.read_bytes()).decode("ascii")
+        return f'url("data:font/woff2;base64,{encoded}")'
+    css = font_pattern.sub(inline_font, css)
+    css = re.sub(r"</style", r"<\\/style", css, flags=re.I)
+    css_count += 1
+    return "<style>\\n" + css + "\\n</style>"
+
+html = link_re.sub(inline_css_link, html)
+if css_count != 1:
+    raise SystemExit(f"Expected exactly one external stylesheet, inlined {css_count}")
+if re.search(r'<script\b[^>]*\bsrc=', html, re.I):
+    raise SystemExit("External script requests remain in index.html")
+if re.search(r'<link\b(?=[^>]*\brel=["\\']stylesheet["\\'])', html, re.I):
+    raise SystemExit("External stylesheet requests remain in index.html")
+
+index_file.write_text(html, encoding="utf-8")
+print(f"Inlined UI assets into {index_file} ({index_file.stat().st_size} bytes)")
+''', encoding="utf-8")
+
+build_ui = root / "scripts/build-ui.sh"
+build_script = build_ui.read_text(encoding="utf-8")
+if "inline_webui_assets.py" not in build_script:
+    if "npm run build\n" not in build_script:
+        raise SystemExit("Could not find npm build command in scripts/build-ui.sh")
+    build_script = build_script.replace(
+        "npm run build\n",
+        "npm run build\npython3 ../scripts/inline_webui_assets.py dist\n",
+        1,
+    )
+    build_ui.write_text(build_script, encoding="utf-8")
+
 print("Applied Mojave WebView diagnostics, safe ResizeObserver fallback, and Safari 14.1 build target.")
