@@ -45,6 +45,26 @@ jobs:
           node --version
           npm --version
 
+      - name: Target UI build for Mojave WebKit
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$SOURCE_ROOT/ui/vite.config.ts" <<'EOF'
+          import { defineConfig } from 'vite'
+          import react from '@vitejs/plugin-react'
+
+          // Mojave's latest Safari/WebKit is 14.1.2; Vite 8 defaults to Safari 16.4.
+          // Preserve the original UI, but emit JavaScript and CSS for Mojave's WebView.
+          export default defineConfig({
+            plugins: [react()],
+            build: {
+              target: 'safari14.1',
+              cssTarget: 'safari14.1',
+            },
+          })
+          EOF
+          cat "$SOURCE_ROOT/ui/vite.config.ts"
+
       - name: Build Intel VST3 and AU for macOS 10.14
         shell: bash
         run: |
