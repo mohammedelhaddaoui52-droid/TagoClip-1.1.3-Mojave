@@ -404,4 +404,385 @@ if "inline_webui_assets.py" not in build_script:
     )
     build_ui.write_text(build_script, encoding="utf-8")
 
+
+# Fix the actual UI interactions and header layout while preserving the approved theme.
+app_path = root / "ui/src/App.tsx"
+app = app_path.read_text()
+old_import = 'import { useEffect, useMemo, useState } from "react";'
+new_import = 'import { useEffect, useMemo, useRef, useState } from "react";'
+if old_import in app:
+    app = app.replace(old_import, new_import, 1)
+elif new_import not in app:
+    raise SystemExit("Could not locate React imports in App.tsx")
+
+state_marker = '  const [heldIdx, setHeldIdx] = useState(0);\n  const applyPreset = (i: number) => {'
+state_replacement = '''  const [heldIdx, setHeldIdx] = useState(0);
+  const [presetOpen, setPresetOpen] = useState(false);
+  const presetRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const closeOnOutside = (event: Event) => {
+      if (!presetRef.current?.contains(event.target as Node)) setPresetOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPresetOpen(false);
+    };
+    document.addEventListener("mousedown", closeOnOutside);
+    document.addEventListener("touchstart", closeOnOutside, { passive: true });
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOnOutside);
+      document.removeEventListener("touchstart", closeOnOutside);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, []);
+
+  const applyPreset = (i: number) => {'''
+if state_marker in app:
+    app = app.replace(state_marker, state_replacement, 1)
+elif "const [presetOpen, setPresetOpen]" not in app:
+    raise SystemExit("Could not locate preset state insertion point in App.tsx")
+
+old_preset = '''        <div className="preset">
+          <button id="prev" title="Previous preset" onClick={() => applyPreset(stepBase - 1)}>
+            ‹
+          </button>
+          <div className="name" id="preset-name">
+            {presetName}
+          </div>
+          <button id="next" title="Next preset" onClick={() => applyPreset(stepBase + 1)}>
+            ›
+          </button>
+        </div>'''
+new_preset = '''        <div className={"preset" + (presetOpen ? " open" : "")} ref={presetRef}>
+          <button type="button" id="prev" title="Previous preset" aria-label="Previous preset" onClick={() => applyPreset(stepBase - 1)}>
+            ‹
+          </button>
+          <button
+            type="button"
+            className="name"
+            id="preset-name"
+            title="Choose preset"
+            aria-haspopup="menu"
+            aria-expanded={presetOpen}
+            onClick={() => setPresetOpen((open) => !open)}
+          >
+            <span>{presetName}</span><span className="preset-caret" aria-hidden="true">▾</span>
+          </button>
+          <button type="button" id="next" title="Next preset" aria-label="Next preset" onClick={() => applyPreset(stepBase + 1)}>
+            ›
+          </button>
+          {presetOpen && (
+            <div className="preset-menu" role="menu" aria-label="Presets">
+              {PRESETS.map(([name], i) => (
+                <button
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={i === matchedIdx}
+                  className={i === matchedIdx ? "selected" : ""}
+                  key={name + i}
+                  onClick={() => {
+                    applyPreset(i);
+                    setPresetOpen(false);
+                  }}
+                >
+                  <span>{name}</span>{i === matchedIdx && <span className="preset-check" aria-hidden="true">✓</span>}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>'''
+if old_preset in app:
+    app = app.replace(old_preset, new_preset, 1)
+elif "className=\"preset-menu\"" not in app:
+    raise SystemExit("Could not locate preset markup in App.tsx")
+
+old_power = '''          <button id="power" title="Bypass" onClick={() => bypassToggle.set(!bypassed)}>'''
+new_power = '''          <button
+            type="button"
+            id="power"
+            title={bypassed ? "Turn processing on" : "Bypass processing"}
+            aria-label={bypassed ? "Turn processing on" : "Bypass processing"}
+            aria-pressed={bypassed}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              bypassToggle.set(!bypassed);
+            }}
+          >'''
+if old_power in app:
+    app = app.replace(old_power, new_power, 1)
+elif 'aria-pressed={bypassed}' not in app:
+    raise SystemExit("Could not locate power button markup in App.tsx")
+app_path.write_text(app)
+
+# Legacy WKWebView: knob drags use window-level mouse/touch listeners rather than
+# relying on setPointerCapture on SVG descendants, which varied across WebKit.
+knob_path = root / "ui/src/Knob.tsx"
+knob = knob_path.read_text()
+knob = knob.replace(
+    'const drag = useRef({ startY: 0, startVal: 0 });',
+    'const drag = useRef({ startY: 0, startVal: 0, active: false });',
+    1
+)
+old_handlers = '''  const onPointerDown = (e: React.PointerEvent) => {
+    drag.current = { startY: e.clientY, startVal: value };
+    (e.target as Element).setPointerCapture(e.pointerId);
+    param.dragStarted();
+  };
+  const onPointerMove = (e: React.PointerEvent) => {
+    if (!(e.target as Element).hasPointerCapture?.(e.pointerId)) return;
+    const fine = e.shiftKey;
+    const px = fine ? 900 : 220; // pixels for full sweep
+    // Drag in knob space, not in value space, so the two halves of a centred
+    // knob each get half the travel. Identical to before for linear knobs.
+    const moved = toNorm(drag.current.startVal) + (drag.current.startY - e.clientY) / px;
+    set(fromNorm(Math.min(1, Math.max(0, moved))), fine);
+  };
+  const onPointerUp = (e: React.PointerEvent) => {
+    (e.target as Element).releasePointerCapture?.(e.pointerId);
+    param.dragEnded();
+  };
+  const onDoubleClick = () => set(spec.def, false);'''
+new_handlers = '''  const onMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || drag.current.active) return;
+    e.preventDefault();
+    drag.current = { startY: e.clientY, startVal: value, active: true };
+    param.dragStarted();
+    const onMove = (event: MouseEvent) => {
+      if (!drag.current.active) return;
+      event.preventDefault();
+      const fine = event.shiftKey;
+      const px = fine ? 900 : 220;
+      const moved = toNorm(drag.current.startVal) + (drag.current.startY - event.clientY) / px;
+      set(fromNorm(Math.min(1, Math.max(0, moved))), fine);
+    };
+    const finish = () => {
+      if (!drag.current.active) return;
+      drag.current.active = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", finish);
+      window.removeEventListener("blur", finish);
+      param.dragEnded();
+    };
+    window.addEventListener("mousemove", onMove, { passive: false });
+    window.addEventListener("mouseup", finish);
+    window.addEventListener("blur", finish);
+  };
+  const onTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    const first = e.changedTouches.item(0);
+    if (!first || drag.current.active) return;
+    e.preventDefault();
+    drag.current = { startY: first.clientY, startVal: value, active: true };
+    const touchId = first.identifier;
+    param.dragStarted();
+    const onMove = (event: TouchEvent) => {
+      if (!drag.current.active) return;
+      for (let i = 0; i < event.touches.length; i++) {
+        const touch = event.touches.item(i);
+        if (!touch || touch.identifier !== touchId) continue;
+        event.preventDefault();
+        const moved = toNorm(drag.current.startVal) + (drag.current.startY - touch.clientY) / 220;
+        set(fromNorm(Math.min(1, Math.max(0, moved))), false);
+        break;
+      }
+    };
+    const finish = (event: TouchEvent) => {
+      for (let i = 0; i < event.changedTouches.length; i++) {
+        const touch = event.changedTouches.item(i);
+        if (touch && touch.identifier === touchId) {
+          if (!drag.current.active) return;
+          drag.current.active = false;
+          window.removeEventListener("touchmove", onMove);
+          window.removeEventListener("touchend", finish);
+          window.removeEventListener("touchcancel", finish);
+          param.dragEnded();
+          return;
+        }
+      }
+    };
+    window.addEventListener("touchmove", onMove, { passive: false });
+    window.addEventListener("touchend", finish);
+    window.addEventListener("touchcancel", finish);
+  };
+  const onDoubleClick = () => set(spec.def, false);'''
+if old_handlers in knob:
+    knob = knob.replace(old_handlers, new_handlers, 1)
+elif "const onMouseDown = (e: React.MouseEvent<HTMLDivElement>)" not in knob:
+    raise SystemExit("Could not locate knob pointer-handler block in Knob.tsx")
+knob = knob.replace(
+    '''      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onDoubleClick={onDoubleClick}''',
+    '''      onMouseDown={onMouseDown}
+      onTouchStart={onTouchStart}
+      onDoubleClick={onDoubleClick}''',
+    1
+)
+if "onPointerMove={onPointerMove}" in knob:
+    raise SystemExit("Knob pointer event props were not fully replaced")
+knob_path.write_text(knob)
+
+# CSS overrides keep the fixed design canvas but prevent flex shrink/overlap.
+css_path = root / "ui/src/App.css"
+css = css_path.read_text()
+if "Mojave WebKit refinements: non-overlapping header" not in css:
+    css += r'''
+/* Mojave WebKit refinements: non-overlapping header, accessible preset menu,
+   and crisp labels without changing the approved dark/accent visual language. */
+#plugin {
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+}
+header {
+  display: grid;
+  grid-template-columns: max-content minmax(150px, 1fr) max-content;
+  column-gap: 12px;
+  align-items: center;
+  padding: 11px 16px 10px;
+  z-index: 5;
+}
+.wordmark { flex: 0 0 auto; font-size: 20px; letter-spacing: -0.035em; }
+.preset {
+  position: relative;
+  width: 100%;
+  max-width: 172px;
+  min-width: 0;
+  justify-self: center;
+  z-index: 6;
+}
+.preset > button#prev, .preset > button#next {
+  flex: 0 0 22px;
+  width: 22px;
+  padding: 2px 0;
+  line-height: 1.1;
+}
+.preset .name {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  flex: 1 1 auto;
+  width: 0;
+  min-width: 0;
+  overflow: hidden;
+  padding: 3px 2px;
+  border: 0;
+  background: transparent;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 700 10px/1.2 "Martian Mono", monospace;
+  letter-spacing: 0.13em;
+  cursor: pointer;
+}
+.preset .name > span:first-child {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.preset-caret { flex: 0 0 auto; font-size: 9px; letter-spacing: 0; color: var(--dim); }
+.preset .name:hover, .preset .name[aria-expanded="true"] { color: var(--accent); }
+.preset-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: -1px;
+  right: -1px;
+  z-index: 20;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px;
+  background: #0A0908;
+  border: 1px solid rgba(236, 231, 222, 0.22);
+  border-radius: 6px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.75), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+.preset-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 9px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--dim);
+  background: transparent;
+  font: 700 9px/1.3 "Martian Mono", monospace;
+  letter-spacing: 0.08em;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.preset-menu button:hover, .preset-menu button:focus-visible {
+  color: var(--text-hi);
+  background: rgba(236, 231, 222, 0.06);
+  outline: none;
+}
+.preset-menu button.selected {
+  color: var(--accent);
+  background: rgba(0, 253, 220, 0.07);
+  border-color: rgba(0, 253, 220, 0.28);
+}
+.preset-check { color: var(--accent); }
+.header-right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: max-content;
+  flex: 0 0 auto;
+}
+.header-meta {
+  flex: 0 0 auto;
+  font-size: 8px;
+  letter-spacing: 0.10em;
+  line-height: 1.2;
+}
+.header-mix { flex: 0 0 auto; }
+.header-mix .knob-unit {
+  width: auto;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: row-reverse;
+  gap: 4px;
+  white-space: nowrap;
+}
+.header-mix .knob-label { font-size: 8px; letter-spacing: 0.10em; }
+.header-mix .knob-value { min-width: 28px; font-size: 8px; letter-spacing: 0.04em; }
+#power {
+  box-sizing: border-box;
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  margin: 0;
+  line-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  z-index: 1;
+}
+#power svg {
+  display: block;
+  flex: 0 0 12px;
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  transform: translate(0, 0);
+  pointer-events: none;
+}
+.knob-unit { touch-action: none; -webkit-user-select: none; user-select: none; }
+'''
+    css_path.write_text(css)
+
+# Correct static font-face metadata: let Safari synthesize bold instead of loading a regular file as an exact 700/800 match.
+fonts_path = root / "ui/src/fonts/fonts.css"
+fonts = fonts_path.read_text()
+fonts_new = re.sub(r'/\* Archivo (?:500|700|800) latin \*/\n@font-face \{.*?\n\}\n', '', fonts, flags=re.S)
+if fonts_new != fonts:
+    fonts_path.write_text(fonts_new)
+print("Applied Mojave-compatible knob drag, preset dropdown, header layout, font and power-button fixes.")
+
 print("Applied Mojave WebView diagnostics, safe ResizeObserver fallback, and Safari 14.1 build target.")
