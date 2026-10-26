@@ -286,7 +286,7 @@ def asset_path(url: str, base: Path) -> Path:
     return (base / url).resolve()
 
 script_re = re.compile(
-    r'<script\b(?P<attrs>[^>]*)\bsrc=["\\'](?P<src>[^"\\']+)["\\'][^>]*>\s*</script>',
+    r"""<script\b(?P<attrs>[^>]*)\bsrc=["'](?P<src>[^"']+)["'][^>]*>\s*</script>""",
     re.I | re.S,
 )
 script_count = 0
@@ -294,27 +294,30 @@ script_count = 0
 def inline_script(match):
     global script_count
     tag = match.group(0)
-    if not re.search(r'\btype=["\\']module["\\']', tag, re.I):
+    if not re.search(r"""\btype=["']module["']""", tag, re.I):
         return tag
     js_path = asset_path(match.group("src"), dist)
     if not js_path.is_file():
         raise SystemExit(f"JavaScript bundle not found: {js_path}")
     js = js_path.read_text(encoding="utf-8")
     # Prevent an embedded literal from prematurely closing the HTML script tag.
-    js = re.sub(r"</script", r"<\\/script", js, flags=re.I)
+    js = re.sub(r"</script", r"<\/script", js, flags=re.I)
     script_count += 1
-    return "<script type=\\"module\\">\\n" + js + "\\n</script>"
+    return '<script type="module">\n' + js + '\n</script>'
 
 html = script_re.sub(inline_script, html)
 if script_count != 1:
     raise SystemExit(f"Expected exactly one external module script, inlined {script_count}")
 
 link_re = re.compile(
-    r'<link\b(?=[^>]*\brel=["\\']stylesheet["\\'])[^>]*\bhref=["\\'](?P<href>[^"\\']+)["\\'][^>]*>',
+    r"""<link\b(?=[^>]*\brel=["']stylesheet["'])[^>]*\bhref=["'](?P<href>[^"']+)["'][^>]*>""",
     re.I | re.S,
 )
 css_count = 0
-font_pattern = re.compile(r"url\\(\\s*['\\"]?(?P<url>[^)'\\"]+\\.woff2(?:\\?[^)'\\"]*)?)['\\"]?\\s*\\)", re.I)
+font_pattern = re.compile(
+    r"""url\(\s*["']?(?P<url>[^)"']+\.woff2(?:\?[^)"']*)?)["']?\s*\)""",
+    re.I,
+)
 
 def inline_css_link(match):
     global css_count
@@ -333,16 +336,16 @@ def inline_css_link(match):
         encoded = base64.b64encode(font_path.read_bytes()).decode("ascii")
         return f'url("data:font/woff2;base64,{encoded}")'
     css = font_pattern.sub(inline_font, css)
-    css = re.sub(r"</style", r"<\\/style", css, flags=re.I)
+    css = re.sub(r"</style", r"<\/style", css, flags=re.I)
     css_count += 1
-    return "<style>\\n" + css + "\\n</style>"
+    return '<style>\n' + css + '\n</style>'
 
 html = link_re.sub(inline_css_link, html)
 if css_count != 1:
     raise SystemExit(f"Expected exactly one external stylesheet, inlined {css_count}")
 if re.search(r'<script\b[^>]*\bsrc=', html, re.I):
     raise SystemExit("External script requests remain in index.html")
-if re.search(r'<link\b(?=[^>]*\brel=["\\']stylesheet["\\'])', html, re.I):
+if re.search(r"""<link\b(?=[^>]*\brel=["']stylesheet["'])""", html, re.I):
     raise SystemExit("External stylesheet requests remain in index.html")
 
 index_file.write_text(html, encoding="utf-8")
