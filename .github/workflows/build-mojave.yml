@@ -45,24 +45,14 @@ jobs:
           node --version
           npm --version
 
-      - name: Target UI build for Mojave WebKit
+      - name: Apply Mojave WebView diagnostics and compatibility safeguards
         shell: bash
         run: |
           set -euo pipefail
-          cat > "$SOURCE_ROOT/ui/vite.config.ts" <<'EOF'
-          import { defineConfig } from 'vite'
-          import react from '@vitejs/plugin-react'
-
-          // Mojave's latest Safari/WebKit is 14.1.2; Vite 8 defaults to Safari 16.4.
-          // Preserve the original UI, but emit JavaScript and CSS for Mojave's WebView.
-          export default defineConfig({
-            plugins: [react()],
-            build: {
-              target: 'safari14.1',
-              cssTarget: 'safari14.1',
-            },
-          })
-          EOF
+          python3 "$GITHUB_WORKSPACE/.github/scripts/apply_mojave_ui_diagnostics.py" "$SOURCE_ROOT"
+          echo "Applied source-level UI diagnostics and Safari 14.1 target."
+          grep -n "RESOURCE_MISSING url=" "$SOURCE_ROOT/plugin/PluginEditor.cpp"
+          grep -n "typeof ResizeObserver" "$SOURCE_ROOT/ui/src/fit.ts"
           cat "$SOURCE_ROOT/ui/vite.config.ts"
 
       - name: Build Intel VST3 and AU for macOS 10.14
