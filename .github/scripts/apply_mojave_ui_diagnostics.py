@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Apply Mojave WebView diagnostics and safe UI fallbacks to a prepared TagoClip tree."""
 from pathlib import Path
+import re
 import sys
 
 root = Path(sys.argv[1]).resolve()
