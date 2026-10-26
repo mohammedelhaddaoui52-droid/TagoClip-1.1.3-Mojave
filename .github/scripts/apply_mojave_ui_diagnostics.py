@@ -185,14 +185,38 @@ std::optional<juce::WebBrowserComponent::Resource> TagoClipEditor::lookupResourc
                            }
                            window.addEventListener("error", function (event) {
                                var target = event && event.target;
-                               if (target && target !== window && (target.src || target.href)) {
-                                   report("resource-error", "Failed to load resource", target.src || target.href);
-                               } else {
-                                   report("error", event && event.message, (event && event.filename ? event.filename : "")
-                                       + ":" + (event && event.lineno ? event.lineno : 0)
-                                       + ":" + (event && event.colno ? event.colno : 0));
-                               }
+                               var error = event && event.error;
+                               var resource = target && target !== window && (target.src || target.href);
+                               var targetInfo = target && target !== window
+                                   ? (target.tagName || "element") + "; type="
+                                     + (target.type || "") + "; src=" + (target.src || target.href || "")
+                                     + "; html=" + String(target.outerHTML || "").slice(0, 180)
+                                   : "window";
+                               var stack = "";
+                               try { stack = error && (error.stack || error.message) || ""; } catch (ignored) {}
+                               var message = event && event.message || error && (error.message || String(error)) || "";
+                               report(resource ? "resource-error" : "error",
+                                   message || "Unspecified JavaScript error",
+                                   "file=" + (event && event.filename || "")
+                                   + "; line=" + (event && event.lineno || 0)
+                                   + "; col=" + (event && event.colno || 0)
+                                   + "; name=" + (error && error.name || "")
+                                   + "; errorMessage=" + (error && error.message || "")
+                                   + "; stack=" + stack
+                                   + "; target=" + targetInfo);
                            }, true);
+                           var originalConsoleError = console.error;
+                           console.error = function () {
+                               try {
+                                   var args = Array.prototype.map.call(arguments, function (item) {
+                                       if (item && item.stack) return String(item.stack);
+                                       if (item && item.message) return String(item.message);
+                                       return String(item);
+                                   });
+                                   report("console-error", args.join(" "), "console.error intercepted");
+                               } catch (ignored) {}
+                               return originalConsoleError.apply(console, arguments);
+                           };
                            window.addEventListener("unhandledrejection", function (event) {
                                var reason = event && event.reason;
                                report("unhandled-rejection", reason && (reason.stack || reason.message) || reason);
@@ -255,12 +279,12 @@ elif "typeof ResizeObserver" not in s:
 (root / "ui/vite.config.ts").write_text("""import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// Mojave ships Safari/WebKit 14.1.2. Target it without changing the UI design.
+// Use a conservative syntax target for embedded WKWebView versions on macOS Mojave.
 export default defineConfig({
   plugins: [react()],
   build: {
-    target: 'safari14.1',
-    cssTarget: 'safari14.1',
+    target: 'safari12.1',
+    cssTarget: 'safari12.1',
   },
 })
 """)
@@ -303,7 +327,7 @@ def inline_script(match):
     # Prevent an embedded literal from prematurely closing the HTML script tag.
     js = re.sub(r"</script", r"<\/script", js, flags=re.I)
     script_count += 1
-    return '<script type="module">\n' + js + '\n</script>'
+    return '<script>\n' + js + '\n</script>'
 
 html = script_re.sub(inline_script, html)
 if script_count != 1:
@@ -345,6 +369,8 @@ if css_count != 1:
     raise SystemExit(f"Expected exactly one external stylesheet, inlined {css_count}")
 if re.search(r'<script\b[^>]*\bsrc=', html, re.I):
     raise SystemExit("External script requests remain in index.html")
+if re.search(r'<script\b[^>]*\btype=["\']module["\']', html, re.I):
+    raise SystemExit("Module script remains in inline-asset build")
 if re.search(r"""<link\b(?=[^>]*\brel=["']stylesheet["'])""", html, re.I):
     raise SystemExit("External stylesheet requests remain in index.html")
 
