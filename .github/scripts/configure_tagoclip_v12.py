@@ -84,7 +84,6 @@ old_button = '''<button type="button" className="preset-save-action"
                   + SAVE CURRENT AS…
                 </button>'''
 new_button = '''<button type="button" className="preset-save-action"
-                  title="Save current settings as a named preset"
                   aria-label="Save current settings as a named preset"
                   disabled={presetBusy || !presetStoreReady}
                   onClick={() => { setSaveMode(true); setSaveName(""); setPresetNotice(""); }}>
@@ -92,7 +91,7 @@ new_button = '''<button type="button" className="preset-save-action"
                 </button>'''
 if old_button in a:
     a = a.replace(old_button, new_button, 1)
-elif 'title="Save current settings as a named preset"' not in a:
+elif 'aria-label="Save current settings as a named preset"' not in a:
     raise SystemExit("Could not update V1.2 save button")
 old_form = '<form className="preset-save-form" onSubmit={(event) => { event.preventDefault(); void saveCurrentPreset(); }}>'
 new_form = '<form className="preset-save-form" onKeyDown={(event) => event.stopPropagation()} onKeyUp={(event) => event.stopPropagation()} onSubmit={(event) => { event.preventDefault(); void saveCurrentPreset(); }}>'
