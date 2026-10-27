@@ -55,7 +55,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 "$GITHUB_WORKSPACE/.github/scripts/apply_mojave_ui_diagnostics.py" "$SOURCE_ROOT"
-          echo "Applied source-level UI diagnostics and Safari 14.1 target."
+          python3 "$GITHUB_WORKSPACE/.github/scripts/configure_tagoclip_v12.py" "$SOURCE_ROOT"
+          echo "Configured TagoClip V1.2 with a unique plugin identity and GR meter."
           grep -n "RESOURCE_MISSING url=" "$SOURCE_ROOT/plugin/PluginEditor.cpp"
           grep -n "typeof ResizeObserver" "$SOURCE_ROOT/ui/src/fit.ts"
           cat "$SOURCE_ROOT/ui/vite.config.ts"
@@ -74,16 +75,16 @@ jobs:
           cd "$SOURCE_ROOT"
           mkdir -p "$GITHUB_WORKSPACE/dist"
           ditto -c -k --sequesterRsrc --keepParent \
-            build-mojave/TagoClip_artefacts/Release/VST3/TagoClip.vst3 \
-            "$GITHUB_WORKSPACE/dist/TagoClip-VST3-Mojave-Intel.zip"
+            "build-mojave/TagoClipV12_artefacts/Release/VST3/TagoClip V1.2.vst3" \
+            $GITHUB_WORKSPACE/dist/TagoClip-V1.2-VST3-Mojave-Intel.zip"
           ditto -c -k --sequesterRsrc --keepParent \
-            build-mojave/TagoClip_artefacts/Release/AU/TagoClip.component \
-            "$GITHUB_WORKSPACE/dist/TagoClip-AU-Mojave-Intel.zip"
+            "build-mojave/TagoClipV12_artefacts/Release/AU/TagoClip V1.2.component" \
+            $GITHUB_WORKSPACE/dist/TagoClip-V1.2-AU-Mojave-Intel.zip"
 
       - name: Upload compiled plugins
         uses: actions/upload-artifact@v4
         with:
-          name: TagoClip-Mojave-Intel-Plugins
+          name: TagoClip-V1.2-Mojave-Intel-Plugins
           path: dist/*.zip
           if-no-files-found: error
           retention-days: 14
