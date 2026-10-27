@@ -263,6 +263,441 @@ css += r'''
 '''
 css_path.write_text(css, encoding="utf-8")
 
+
+# V1.2 meter readouts/reset controls and lower-overhead knob dragging.
+# Keep the version and JUCE product identifiers unchanged.
+meters_path = root / "ui/src/Meters.tsx"
+meters_content = r'''import { memo, useEffect, useRef } from "react";
+import { inJuce, onLevels } from "./bridge";
+
+type MeterKind = "in" | "out" | "gr";
+
+interface MeterState {
+  bar: HTMLDivElement | null;
+  peakEl: HTMLDivElement | null;
+  valueEl: HTMLButtonElement | null;
+  peak: number;
+  age: number;
+}
+
+function formatDbfs(level: number): string {
+  if (level <= 1e-6) return "0.0";
+  const db = 20 * Math.log10(level);
+  if (db <= -60) return "−60.0";
+  if (db < -0.05) return "−" + Math.abs(db).toFixed(1);
+  if (db > 0.05) return "+" + db.toFixed(1);
+  return "0.0";
+}
+
+function formatGr(db: number): string {
+  if (db < -0.05) return "−" + Math.abs(db).toFixed(1) + " dB";
+  return "0.0 dB";
+}
+
+function drawMeter(m: MeterState, shown: number, peakSample: number) {
+  if (m.bar) m.bar.style.height = (Math.max(0, Math.min(1, shown)) * 100).toFixed(1) + "%";
+  if (peakSample >= 0) {
+    if (peakSample >= m.peak) {
+      m.peak = peakSample;
+      m.age = 0;
+    } else if (++m.age > 90) {
+      m.peak *= 0.985;
+    }
+  } else if (++m.age > 90) {
+    m.peak *= 0.985;
+  }
+  if (m.peakEl) m.peakEl.style.bottom = (Math.max(0, Math.min(1, m.peak)) * 100).toFixed(1) + "%";
+  if (m.valueEl) m.valueEl.textContent = m.peak <= 1e-6 ? "0.0" : formatDbfs(m.peak);
+}
+
+function Meters({
+  bypassed,
+  driveDb,
+  thresholdSteps,
+  outputDb,
+}: {
+  bypassed: boolean;
+  driveDb: number;
+  thresholdSteps: number;
+  outputDb: number;
+}) {
+  const inBar = useRef<HTMLDivElement>(null);
+  const inPeak = useRef<HTMLDivElement>(null);
+  const inPeakValue = useRef<HTMLButtonElement>(null);
+  const outBar = useRef<HTMLDivElement>(null);
+  const outPeak = useRef<HTMLDivElement>(null);
+  const outPeakValue = useRef<HTMLButtonElement>(null);
+  const grBar = useRef<HTMLDivElement>(null);
+  const grValue = useRef<HTMLButtonElement>(null);
+  const levels = useRef({ in: 0, out: 0, gr: 0 });
+  const levelSerial = useRef(0);
+  const meterStates = useRef<{ in: MeterState | null; out: MeterState | null }>({ in: null, out: null });
+  const resetSerial = useRef({ in: 0, out: 0, gr: 0 });
+  const stateRef = useRef({ bypassed, driveDb, thresholdSteps, outputDb });
+  stateRef.current = { bypassed, driveDb, thresholdSteps, outputDb };
+
+  const resetMeter = (kind: MeterKind) => {
+    levels.current[kind] = 0;
+    resetSerial.current[kind] += 1;
+    if (kind === "in" || kind === "out") {
+      const state = meterStates.current[kind];
+      if (state) {
+        state.peak = 0;
+        state.age = 0;
+        if (state.bar) state.bar.style.height = "0%";
+        if (state.peakEl) state.peakEl.style.bottom = "0%";
+        if (state.valueEl) state.valueEl.textContent = "0.0";
+      }
+    } else {
+      if (grBar.current) grBar.current.style.height = "0%";
+      if (grValue.current) grValue.current.textContent = "0.0 dB";
+    }
+  };
+
+  useEffect(() => {
+    const mIn: MeterState = { bar: inBar.current, peakEl: inPeak.current, valueEl: inPeakValue.current, peak: 0, age: 0 };
+    const mOut: MeterState = { bar: outBar.current, peakEl: outPeak.current, valueEl: outPeakValue.current, peak: 0, age: 0 };
+    meterStates.current = { in: mIn, out: mOut };
+    const unsub = onLevels((l) => {
+      levels.current = l;
+      levelSerial.current += 1;
+    });
+
+    const seenReset = { in: 0, out: 0, gr: 0 };
+    let seenLevelSerial = -1;
+    let raf = 0;
+    let lvl = 0.4;
+    let shownIn = 0;
+    let shownOut = 0;
+    let shownGrDb = 0;
+    const ballistics = (shown: number, target: number) =>
+      target > shown ? shown + (target - shown) * 0.5 : shown * 0.88;
+
+    const tick = () => {
+      const serial = resetSerial.current;
+      if (seenReset.in !== serial.in) {
+        seenReset.in = serial.in;
+        shownIn = 0;
+        mIn.peak = 0; mIn.age = 0;
+        levels.current.in = 0;
+      }
+      if (seenReset.out !== serial.out) {
+        seenReset.out = serial.out;
+        shownOut = 0;
+        mOut.peak = 0; mOut.age = 0;
+        levels.current.out = 0;
+      }
+      if (seenReset.gr !== serial.gr) {
+        seenReset.gr = serial.gr;
+        shownGrDb = 0;
+        levels.current.gr = 0;
+      }
+
+      if (inJuce) {
+        const freshLevels = levelSerial.current !== seenLevelSerial;
+        seenLevelSerial = levelSerial.current;
+        const rawIn = Math.max(0, levels.current.in);
+        const rawOut = Math.max(0, levels.current.out);
+        shownIn = ballistics(shownIn, Math.min(1, rawIn));
+        shownOut = ballistics(shownOut, Math.min(1, rawOut));
+        drawMeter(mIn, shownIn, freshLevels ? rawIn : -1);
+        drawMeter(mOut, shownOut, freshLevels ? rawOut : -1);
+
+        // The GR meter uses the same processor reading and attack/release
+        // coefficients as the transfer-curve GR readout.
+        const grTarget = stateRef.current.bypassed ? 0 : Math.min(0, levels.current.gr);
+        shownGrDb += (grTarget - shownGrDb) * (grTarget < shownGrDb ? 0.6 : 0.06);
+      } else {
+        const { bypassed: byp, driveDb: drive, thresholdSteps: steps, outputDb: output } = stateRef.current;
+        lvl += (0.35 + 0.35 * Math.random() - lvl) * 0.07;
+        const inShown = Math.max(0, lvl + 0.06 * Math.sin(Date.now() / 230));
+        shownIn = ballistics(shownIn, Math.min(1, inShown));
+        drawMeter(mIn, shownIn, inShown);
+        if (byp) {
+          shownOut = ballistics(shownOut, inShown);
+          drawMeter(mOut, shownOut, inShown);
+        } else {
+          const threshold = steps / 128;
+          const driven = inShown * Math.pow(10, (drive / 20) * 0.5);
+          const clipped = Math.min(driven, Math.max(threshold, Math.min(1, driven * 0.85)));
+          const outGain = Math.pow(10, (output / 20) * 0.5);
+          const outTarget = Math.min(1, clipped * outGain);
+          shownOut = ballistics(shownOut, outTarget);
+          drawMeter(mOut, shownOut, outTarget);
+        }
+        const threshold = steps / 128;
+        const driven = 0.45 * Math.pow(10, drive / 20);
+        const grTarget = !byp && driven > threshold
+          ? -Math.min(24, 20 * Math.log10(driven / threshold) * 0.8) : 0;
+        shownGrDb += (grTarget - shownGrDb) * (grTarget < shownGrDb ? 0.6 : 0.06);
+      }
+
+      if (grBar.current)
+        grBar.current.style.height = (Math.min(24, Math.abs(shownGrDb)) / 24 * 100).toFixed(1) + "%";
+      if (grValue.current) grValue.current.textContent = formatGr(shownGrDb);
+      raf = requestAnimationFrame(tick);
+    };
+
+    tick();
+    return () => {
+      cancelAnimationFrame(raf);
+      unsub();
+      meterStates.current = { in: null, out: null };
+    };
+  }, []);
+
+  return (
+    <div className="meter-unit" aria-label="Audio level meters">
+      <div className="meter-col gr-meter-col">
+        <button type="button" className="meter-value gr-meter-value" ref={grValue}
+          title="Gain reduction in dB; click to reset this meter"
+          aria-label="Reset gain reduction meter" onClick={() => resetMeter("gr")}>0.0 dB</button>
+        <div className="meter gr-meter" id="meter-gr" title="Gain reduction">
+          <div className="gr-bar" ref={grBar} />
+        </div>
+        <div className="meter-label gr-meter-label">GR</div>
+      </div>
+      <div className="meter-col">
+        <button type="button" className="meter-value" ref={inPeakValue}
+          title="Input peak in dBFS; click to reset this meter"
+          aria-label="Reset input peak meter" onClick={() => resetMeter("in")}>0.0</button>
+        <div className="meter" id="meter-in">
+          <div className="bar" ref={inBar} />
+          <div className="peak" ref={inPeak} />
+        </div>
+        <div className="meter-label">In</div>
+      </div>
+      <div className="meter-col">
+        <button type="button" className="meter-value" ref={outPeakValue}
+          title="Output peak in dBFS; click to reset this meter"
+          aria-label="Reset output peak meter" onClick={() => resetMeter("out")}>0.0</button>
+        <div className="meter" id="meter-out">
+          <div className="bar" ref={outBar} />
+          <div className="peak" ref={outPeak} />
+        </div>
+        <div className="meter-label">Out</div>
+      </div>
+    </div>
+  );
+}
+
+export default memo(Meters, (prev, next) => {
+  if (inJuce) return prev.bypassed === next.bypassed;
+  return prev.bypassed === next.bypassed
+    && prev.driveDb === next.driveDb
+    && prev.thresholdSteps === next.thresholdSteps
+    && prev.outputDb === next.outputDb;
+});
+'''
+meters_path.write_text(meters_content, encoding="utf-8")
+
+# Make the knob's visual position update on the input event immediately while
+# limiting host relay writes to at most one per display frame. This keeps the
+# UI responsive without queuing redundant JUCE parameter messages.
+knob_path = root / "ui/src/Knob.tsx"
+knob = knob_path.read_text(encoding="utf-8")
+knob = knob.replace('import { useEffect, useMemo, useRef, useState } from "react";',
+                    'import { memo, useEffect, useMemo, useRef, useState } from "react";', 1)
+knob = knob.replace("export default function Knob(", "function Knob(", 1)
+old_commit = '''  const commitValue = (v: number, fine: boolean) => {
+    v = Math.min(spec.max, Math.max(spec.min, v));
+    if (spec.step) v = Math.round(v / spec.step) * spec.step;
+    else if (!fine) v = Math.round(v * 100) / 100;
+    setValue(v);
+    if (Math.abs(v - lastCommitted.current) < 1e-7) return;
+    lastCommitted.current = v;
+    param.setScaled(v);
+  };
+  const set = commitValue;
+  const scheduleValue = (v: number, fine: boolean) => {
+    pendingValue.current = { value: v, fine };
+    if (frameRequest.current !== null) return;
+    frameRequest.current = window.requestAnimationFrame(() => {
+      frameRequest.current = null;
+      const pending = pendingValue.current;
+      pendingValue.current = null;
+      if (pending) commitValue(pending.value, pending.fine);
+    });
+  };'''
+new_commit = '''  const normaliseValue = (v: number, fine: boolean) => {
+    v = Math.min(spec.max, Math.max(spec.min, v));
+    if (spec.step) v = Math.round(v / spec.step) * spec.step;
+    else if (!fine) v = Math.round(v * 100) / 100;
+    return v;
+  };
+  const commitValue = (v: number, fine: boolean, updateLocal = true) => {
+    v = normaliseValue(v, fine);
+    if (updateLocal) setValue(v);
+    if (Math.abs(v - lastCommitted.current) < 1e-7) return;
+    lastCommitted.current = v;
+    param.setScaled(v);
+  };
+  const set = (v: number, fine: boolean) => commitValue(v, fine, true);
+  const scheduleValue = (v: number, fine: boolean) => {
+    const immediate = normaliseValue(v, fine);
+    // Update the knob artwork immediately; only native parameter writes wait
+    // for the next animation frame.
+    setValue(immediate);
+    pendingValue.current = { value: immediate, fine };
+    if (frameRequest.current !== null) return;
+    frameRequest.current = window.requestAnimationFrame(() => {
+      frameRequest.current = null;
+      const pending = pendingValue.current;
+      pendingValue.current = null;
+      if (pending) commitValue(pending.value, pending.fine, false);
+    });
+  };'''
+if old_commit in knob:
+    knob = knob.replace(old_commit, new_commit, 1)
+elif "const normaliseValue = (v: number, fine: boolean)" not in knob:
+    raise SystemExit("Could not locate V1.2 knob commit/schedule block")
+knob = knob.replace("if (pending) commitValue(pending.value, pending.fine);",
+                    "if (pending) commitValue(pending.value, pending.fine, false);", 1)
+if "export default memo(Knob);" not in knob:
+    knob += "\n\nexport default memo(Knob);\n"
+knob_path.write_text(knob, encoding="utf-8")
+
+# Keep the curved transfer scope from rebuilding 160-point SVG strings for
+# unrelated control changes. Memoise the path geometry, then memoise its child.
+scope_path = root / "ui/src/Scope.tsx"
+scope = scope_path.read_text(encoding="utf-8")
+scope = scope.replace('import { useEffect, useRef } from "react";',
+                      'import { memo, useEffect, useMemo, useRef } from "react";', 1)
+scope = scope.replace("export default function Scope(", "function Scope(", 1)
+path_marker = "  const fn = CURVE_FN[curve];"
+path_insert = path_marker + '''
+  const curveD = useMemo(() => curvePath(fn, t), [fn, t]);
+  const deltaD = useMemo(() => deltaPath(fn, t), [fn, t]);'''
+if path_marker in scope and "const curveD = useMemo" not in scope:
+    scope = scope.replace(path_marker, path_insert, 1)
+scope = scope.replace("d={deltaPath(fn, t)}", "d={deltaD}", 1)
+scope = scope.replace("d={curvePath(fn, t)}", "d={curveD}", 1)
+if "export default memo(Scope);" not in scope:
+    scope += "\n\nexport default memo(Scope);\n"
+scope_path.write_text(scope, encoding="utf-8")
+
+# The scope-corner numeric GR display also needs no React parent render on every
+# knob move in the native plugin. Its own RAF reads the native levels stream.
+gr_path = root / "ui/src/GrReadout.tsx"
+gr = gr_path.read_text(encoding="utf-8")
+gr = gr.replace('import { useEffect, useRef } from "react";',
+                'import { memo, useEffect, useRef } from "react";', 1)
+gr = gr.replace("export default function GrReadout(", "function GrReadout(", 1)
+if "export default memo(GrReadout" not in gr:
+    gr += '''
+ 
+export default memo(GrReadout, (prev, next) => {
+  if (inJuce) return prev.bypassed === next.bypassed;
+  return prev.bypassed === next.bypassed
+    && prev.driveDb === next.driveDb
+    && prev.thresholdSteps === next.thresholdSteps;
+});
+'''
+gr_path.write_text(gr, encoding="utf-8")
+
+# Expand V1.2 just enough to fit three equally-spaced meters and numeric readouts.
+fit_path = root / "ui/src/fit.ts"
+fit = fit_path.read_text(encoding="utf-8")
+fit = fit.replace("width: 650, height: 398", "width: 680, height: 398", 1)
+fit_path.write_text(fit, encoding="utf-8")
+css_path = root / "ui/src/App.css"
+css = css_path.read_text(encoding="utf-8")
+css = css.replace("width: 650px; height: 398px;", "width: 680px; height: 398px;", 1)
+css = css.replace("grid-template-columns: 288px 1fr auto 82px;",
+                  "grid-template-columns: 288px 1fr auto 116px;", 1)
+css += r'''
+/* V1.2 meter refinements: identical spacing between all three meter bars. */
+.header-right { gap: 16px; }
+#power { margin-left: 5px; }
+.meter-unit {
+  height: 82%;
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  justify-content: center;
+  gap: 17px;
+}
+.meter-col, .gr-meter-col {
+  flex: 0 0 24px;
+  min-width: 24px;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+}
+.meter-value {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 12px;
+  width: 48px;
+  min-width: 48px;
+  height: 12px;
+  min-height: 12px;
+  margin: 0 0 8px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--accent);
+  font: 700 7.5px/12px "Martian Mono", monospace;
+  letter-spacing: 0;
+  text-align: center;
+  white-space: nowrap;
+  cursor: pointer;
+  overflow: visible;
+}
+.meter-value:hover { color: var(--text-hi); }
+.meter-value:active { opacity: 0.6; }
+.meter-value:focus { outline: none; }
+.meter-value:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+.meter-col .meter, .gr-meter-col .meter {
+  flex: 1 1 auto;
+  width: 7px;
+  min-width: 7px;
+  min-height: 0;
+  align-self: center;
+}
+.meter-label, .gr-meter-label {
+  flex: 0 0 auto;
+  margin-top: 9px;
+  font-size: 8px;
+  line-height: 10px;
+  letter-spacing: 0.08em;
+  text-align: center;
+  white-space: nowrap;
+}
+.gr-meter-value { color: #ff626b; }
+.gr-meter-value:hover { color: #ff9aa0; }
+.gr-meter .gr-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: auto;
+  height: 0%;
+  background: linear-gradient(to bottom, #ff6868, #d52e42);
+  box-shadow: 0 0 7px rgba(255, 61, 75, 0.42);
+}
+.knob-col { gap: 14px; }
+.stack { padding-top: 10px; }
+.stack #monolow { margin-top: 32px; }
+'''
+css_path.write_text(css, encoding="utf-8")
+
+# Keep the JUCE editor canvas, viewport design size, and CSS canvas in agreement.
+editor_path = root / "plugin/PluginEditor.cpp"
+e = editor_path.read_text(encoding="utf-8")
+e = e.replace("designWidth  = 650;", "designWidth  = 680;", 1)
+if "designWidth  = 680;" not in e:
+    raise SystemExit("Could not update V1.2 native editor width")
+editor_path.write_text(e, encoding="utf-8")
+
+print("Applied V1.2 meter peak readouts/reset controls and low-overhead knob responsiveness.")
+
 index_path = root / "ui/index.html"
 index_path.write_text(index_path.read_text(encoding="utf-8").replace(
     "<title>TagoClip</title>", "<title>TagoClip V1.2</title>", 1
