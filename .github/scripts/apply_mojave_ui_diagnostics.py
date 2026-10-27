@@ -1167,7 +1167,7 @@ new_apply = '''  const applyPreset = (i: number) => {
   };
 
   const saveCurrentPreset = async () => {
-    const name = saveName.trim().replace(/\\s+/g, " ").slice(0, 40);
+    const name = saveName.trim().replace(/\s+/g, " ").slice(0, 40);
     if (!name) {
       setPresetNotice("Enter a preset name");
       return;
@@ -1329,5 +1329,248 @@ elif "preset-save-form" not in app:
 app_path.write_text(app)
 
 print("Added persistent custom preset storage and dropdown save/load/delete UI.")
+
+
+# Improve drag responsiveness: coalesce input events to a single commit per
+# screen frame, flush the final movement on release, and ignore host echoes
+# while the drag is live so an asynchronous relay update cannot move the knob back.
+knob_path = root / "ui/src/Knob.tsx"
+knob = knob_path.read_text()
+old_set = '''  const set = (v: number, fine: boolean) => {
+    v = Math.min(spec.max, Math.max(spec.min, v));
+    if (spec.step) v = Math.round(v / spec.step) * spec.step;
+    else if (!fine) v = Math.round(v * 100) / 100;
+    param.setScaled(v);
+    setValue(v);
+  };'''
+new_set = '''  const lastCommitted = useRef(param.getScaled());
+  const pendingValue = useRef<{ value: number; fine: boolean } | null>(null);
+  const frameRequest = useRef<number | null>(null);
+
+  const commitValue = (v: number, fine: boolean) => {
+    v = Math.min(spec.max, Math.max(spec.min, v));
+    if (spec.step) v = Math.round(v / spec.step) * spec.step;
+    else if (!fine) v = Math.round(v * 100) / 100;
+    setValue(v);
+    if (Math.abs(v - lastCommitted.current) < 1e-7) return;
+    lastCommitted.current = v;
+    param.setScaled(v);
+  };
+  const set = commitValue;
+  const scheduleValue = (v: number, fine: boolean) => {
+    pendingValue.current = { value: v, fine };
+    if (frameRequest.current !== null) return;
+    frameRequest.current = window.requestAnimationFrame(() => {
+      frameRequest.current = null;
+      const pending = pendingValue.current;
+      pendingValue.current = null;
+      if (pending) commitValue(pending.value, pending.fine);
+    });
+  };
+  const flushScheduledValue = () => {
+    if (frameRequest.current !== null) {
+      window.cancelAnimationFrame(frameRequest.current);
+      frameRequest.current = null;
+    }
+    const pending = pendingValue.current;
+    pendingValue.current = null;
+    if (pending) commitValue(pending.value, pending.fine);
+  };
+
+  useEffect(() => () => {
+    if (frameRequest.current !== null) window.cancelAnimationFrame(frameRequest.current);
+  }, []);'''
+if old_set in knob:
+    knob = knob.replace(old_set, new_set, 1)
+elif "const scheduleValue = " not in knob:
+    raise SystemExit("Could not locate knob value setter for frame coalescing")
+
+old_subscribe = '''    return param.subscribe(() => setValue(param.getScaled()));'''
+new_subscribe = '''    return param.subscribe(() => {
+      if (drag.current.active) return;
+      const incoming = param.getScaled();
+      lastCommitted.current = incoming;
+      setValue(incoming);
+    });'''
+if old_subscribe in knob:
+    knob = knob.replace(old_subscribe, new_subscribe, 1)
+elif "if (drag.current.active) return;" not in knob:
+    raise SystemExit("Could not locate knob relay subscription")
+
+mouse_move = 'set(fromNorm(Math.min(1, Math.max(0, moved))), fine);'
+if mouse_move in knob:
+    knob = knob.replace(mouse_move, 'scheduleValue(fromNorm(Math.min(1, Math.max(0, moved))), fine);', 1)
+touch_move = 'set(fromNorm(Math.min(1, Math.max(0, moved))), false);'
+if touch_move in knob:
+    knob = knob.replace(touch_move, 'scheduleValue(fromNorm(Math.min(1, Math.max(0, moved))), false);', 1)
+mouse_finish = '''      if (!drag.current.active) return;
+      drag.current.active = false;
+      setIsDragging(false);'''
+if mouse_finish in knob:
+    knob = knob.replace(mouse_finish, '''      if (!drag.current.active) return;
+      flushScheduledValue();
+      drag.current.active = false;
+      setIsDragging(false);''', 1)
+touch_finish = '''          if (!drag.current.active) return;
+          drag.current.active = false;
+          setIsDragging(false);'''
+if touch_finish in knob:
+    knob = knob.replace(touch_finish, '''          if (!drag.current.active) return;
+          flushScheduledValue();
+          drag.current.active = false;
+          setIsDragging(false);''', 1)
+if "scheduleValue(fromNorm" not in knob:
+    raise SystemExit("Drag moves were not switched to frame-coalesced updates")
+knob_path.write_text(knob)
+
+# Use WebKit layout zoom rather than scaling a pre-rendered transform layer.
+fit_path = root / "ui/src/fit.ts"
+fit = fit_path.read_text()
+fit_pattern = r'    style\.setProperty\("--ui-scale", String\(scale\)\);\n    style\.setProperty\("--ui-x".*\n    style\.setProperty\("--ui-y".*'
+new_fit_vars = '''    const offsetX = (vw - design.width * scale) / 2;
+    const offsetY = (vh - design.height * scale) / 2;
+    style.setProperty("--ui-scale", String(scale));
+    style.setProperty("--ui-left", (offsetX / scale) + "px");
+    style.setProperty("--ui-top", (offsetY / scale) + "px");
+    style.setProperty("--ui-x", offsetX + "px");
+    style.setProperty("--ui-y", offsetY + "px");'''
+fit_match = re.search(fit_pattern, fit)
+if fit_match:
+    fit = fit[:fit_match.start()] + new_fit_vars + fit[fit_match.end():]
+    fit_path.write_text(fit)
+elif "--ui-left" not in fit:
+    raise SystemExit("Could not locate UI fit variable assignments")
+
+# Match the reference spacing and keep vectors/text crisp at rest on Mojave.
+css_path = root / "ui/src/App.css"
+css = css_path.read_text()
+if "Final Mojave refinements: native-quality zoom" not in css:
+    css += r'''
+/* Final Mojave refinements: native-quality zoom, reference spacing, persistent presets. */
+#plugin {
+  left: var(--ui-left, 0px);
+  top: var(--ui-top, 0px);
+  transform: none !important;
+  zoom: var(--ui-scale, 1);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+}
+.header-meta {
+  margin-right: 10px;
+  flex-shrink: 0;
+}
+.knob-col {
+  gap: 26px;
+}
+.stack {
+  padding-top: 4px;
+  gap: 12px;
+}
+.stack #monolow {
+  margin-top: 38px;
+}
+.knob-unit.dragging .knob-label,
+.knob-unit.dragging .knob-value,
+.header-mix .knob-unit.dragging .knob-label,
+.header-mix .knob-unit.dragging .knob-value {
+  color: var(--accent) !important;
+}
+.preset-menu {
+  min-width: 210px;
+  max-height: 270px;
+  padding: 5px;
+}
+.preset-section-title {
+  padding: 7px 8px 4px;
+  color: var(--faint);
+  font: 700 7px/1.3 "Martian Mono", monospace;
+  letter-spacing: 0.14em;
+}
+.preset-section-title.custom-title {
+  margin-top: 5px;
+  border-top: 1px solid var(--hairline);
+  padding-top: 9px;
+}
+.preset-empty, .preset-notice {
+  padding: 5px 8px;
+  color: var(--dim);
+  font: 8px/1.4 "Martian Mono", monospace;
+  white-space: normal;
+}
+.preset-custom-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.preset-custom-row > button:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.preset-delete {
+  flex: 0 0 22px;
+  width: 22px;
+  padding: 5px 0 !important;
+  border: 1px solid transparent !important;
+  color: var(--faint) !important;
+  text-align: center;
+}
+.preset-delete:hover {
+  color: #ff8b82 !important;
+  border-color: rgba(255, 139, 130, 0.35) !important;
+}
+.preset-delete:disabled, .preset-save-action:disabled,
+.preset-save-buttons button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.preset-save-action {
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px !important;
+  color: var(--accent) !important;
+  border-top: 1px solid var(--hairline) !important;
+  text-align: center !important;
+}
+.preset-save-form {
+  padding: 7px 5px 4px;
+  border-top: 1px solid var(--hairline);
+}
+.preset-save-form input {
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 3px;
+  background: var(--bg-deep);
+  color: var(--text-hi);
+  outline: none;
+  font: 9px "Martian Mono", monospace;
+}
+.preset-save-form input:focus {
+  border-color: rgba(0, 253, 220, 0.6);
+}
+.preset-save-buttons {
+  display: flex;
+  gap: 5px;
+  margin-top: 6px;
+}
+.preset-save-buttons button {
+  flex: 1 1 0;
+  padding: 6px 4px;
+  border: 1px solid var(--hairline);
+  border-radius: 3px;
+  background: var(--bg-deep);
+  color: var(--dim);
+  font: 700 8px "Martian Mono", monospace;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+.preset-save-buttons button[type="submit"] {
+  color: var(--accent);
+  border-color: rgba(0, 253, 220, 0.35);
+}
+'''
+    css_path.write_text(css)
+
+print("Applied frame-coalesced knob response, reference spacing, and high-quality WebKit scaling.")
 
 print("Applied Mojave WebView diagnostics, safe ResizeObserver fallback, and Safari 14.1 build target.")
