@@ -911,4 +911,423 @@ if fonts_new != fonts:
     fonts_path.write_text(fonts_new)
 print("Applied Mojave-compatible knob drag, preset dropdown, header layout, font and power-button fixes.")
 
+
+# Persist custom presets via native file I/O instead of relying on WebView storage.
+editor = root / "plugin/PluginEditor.cpp"
+s = editor.read_text()
+preset_file_helper = r'''
+juce::File customPresetStoreFile()
+{
+    auto directory = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                         .getChildFile ("TagoBeats")
+                         .getChildFile ("TagoClip");
+    directory.createDirectory();
+    return directory.getChildFile ("CustomPresets.json");
+}
+
+'''
+resource_marker = "juce::String resourcePathFromUrl (juce::String url)"
+if "juce::File customPresetStoreFile()" not in s:
+    if resource_marker not in s:
+        raise SystemExit("Could not locate namespace insertion point for custom preset storage")
+    s = s.replace(resource_marker, preset_file_helper + resource_marker, 1)
+
+native_marker = '                   .withEventListener ("uiDiagnostic", [] (juce::var event)'
+native_functions = r'''                   .withNativeFunction ("loadCustomPresets",
+                                        [] (const juce::Array<juce::var>&,
+                                            juce::WebBrowserComponent::NativeFunctionCompletion done)
+                                        {
+                                            auto file = customPresetStoreFile();
+                                            auto parsed = file.existsAsFile()
+                                                ? juce::JSON::parse (file.loadFileAsString())
+                                                : juce::var (juce::Array<juce::var> {});
+                                            if (! parsed.isArray())
+                                            {
+                                                writeUiDiagnostic ("CUSTOM_PRESETS_INVALID_JSON");
+                                                done (juce::var (juce::Array<juce::var> {}));
+                                                return;
+                                            }
+                                            done (parsed);
+                                        })
+                   .withNativeFunction ("saveCustomPresets",
+                                        [] (const juce::Array<juce::var>& args,
+                                            juce::WebBrowserComponent::NativeFunctionCompletion done)
+                                        {
+                                            if (args.size() != 1 || ! args[0].isArray())
+                                            {
+                                                done (false);
+                                                return;
+                                            }
+                                            const auto* list = args[0].getArray();
+                                            if (list == nullptr || list->size() > 64)
+                                            {
+                                                done (false);
+                                                return;
+                                            }
+                                            const auto json = juce::JSON::toString (args[0], true);
+                                            if (json.length() > 512 * 1024)
+                                            {
+                                                done (false);
+                                                return;
+                                            }
+                                            auto file = customPresetStoreFile();
+                                            if (! file.getParentDirectory().isDirectory()
+                                                && ! file.getParentDirectory().createDirectory())
+                                            {
+                                                done (false);
+                                                return;
+                                            }
+                                            const auto wrote = file.replaceWithText (json);
+                                            const auto parsed = wrote
+                                                ? juce::JSON::parse (file.loadFileAsString())
+                                                : juce::var();
+                                            const auto verified = wrote && parsed.isArray()
+                                                && parsed.getArray() != nullptr
+                                                && parsed.getArray()->size() == list->size();
+                                            writeUiDiagnostic (verified
+                                                ? "CUSTOM_PRESETS_SAVED"
+                                                : "CUSTOM_PRESETS_SAVE_FAILED");
+                                            done (verified);
+                                        })
+'''
+if '.withNativeFunction ("loadCustomPresets"' not in s:
+    if native_marker not in s:
+        raise SystemExit("Could not find native function insertion point for custom preset store")
+    s = s.replace(native_marker, native_functions + native_marker, 1)
+editor.write_text(s)
+
+# Frontend wrapper calls native file-backed functions in the plugin; standalone
+# browser previews use localStorage only as a development fallback.
+bridge_path = root / "ui/src/bridge.ts"
+bridge = bridge_path.read_text()
+if "export interface StoredPreset" not in bridge:
+    bridge += r'''
+
+export interface StoredPreset {
+  id: string;
+  name: string;
+  values: Record<string, number>;
+  curve: string;
+  osFactor: number;
+}
+
+const CUSTOM_PRESET_STORAGE_KEY = "tagoclip-v1-custom-presets";
+
+export async function loadCustomPresets(): Promise<unknown[]> {
+  if (inJuce) {
+    const result = await Juce.getNativeFunction("loadCustomPresets")();
+    return Array.isArray(result) ? result : [];
+  }
+  try {
+    const raw = window.localStorage.getItem(CUSTOM_PRESET_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveCustomPresets(presets: StoredPreset[]): Promise<boolean> {
+  if (inJuce) {
+    try {
+      const result = await Juce.getNativeFunction("saveCustomPresets")(presets);
+      return result === true;
+    } catch {
+      return false;
+    }
+  }
+  try {
+    window.localStorage.setItem(CUSTOM_PRESET_STORAGE_KEY, JSON.stringify(presets));
+    const check = JSON.parse(window.localStorage.getItem(CUSTOM_PRESET_STORAGE_KEY) || "null");
+    return Array.isArray(check) && check.length === presets.length;
+  } catch {
+    return false;
+  }
+}
+'''
+    bridge_path.write_text(bridge)
+
+app_path = root / "ui/src/App.tsx"
+app = app_path.read_text()
+old_import = 'import { makeParam, makeToggle, type ParamHandle, type ToggleHandle } from "./bridge";'
+new_import = 'import { loadCustomPresets, saveCustomPresets, makeParam, makeToggle, type ParamHandle, type ToggleHandle, type StoredPreset } from "./bridge";'
+if old_import in app:
+    app = app.replace(old_import, new_import, 1)
+elif "loadCustomPresets, saveCustomPresets" not in app:
+    raise SystemExit("Could not update bridge imports in App.tsx")
+
+type_marker = "export default function App() {"
+types_block = r'''function validateStoredPresets(input: unknown): StoredPreset[] {
+  if (!Array.isArray(input)) return [];
+  const validCurves = CURVE_CHIPS.map((chip) => chip.key);
+  const validFactors: number[] = [...OS_FACTORS];
+  return input.filter((item): item is StoredPreset => {
+    if (!item || typeof item !== "object") return false;
+    const preset = item as Partial<StoredPreset>;
+    if (typeof preset.id !== "string" || typeof preset.name !== "string") return false;
+    if (!preset.name.trim() || preset.name.length > 40) return false;
+    if (!preset.values || typeof preset.values !== "object") return false;
+    if (typeof preset.curve !== "string" || !validCurves.includes(preset.curve as CurveKey)) return false;
+    if (typeof preset.osFactor !== "number" || !validFactors.includes(preset.osFactor)) return false;
+    return Object.keys(PARAMS).every((key) => {
+      const value = preset.values?.[key];
+      const spec = PARAMS[key];
+      return typeof value === "number" && Number.isFinite(value) && value >= spec.min && value <= spec.max;
+    });
+  });
+}
+
+function storedPresetMatches(
+  preset: StoredPreset,
+  values: Record<string, number>,
+  curve: CurveKey,
+  osFactor: number
+): boolean {
+  if (preset.curve !== curve || preset.osFactor !== osFactor) return false;
+  return Object.keys(PARAMS).every((key) => {
+    const spec = PARAMS[key];
+    const epsilon = spec.step > 0 ? spec.step / 2 : (spec.max - spec.min) * 1e-3;
+    return Math.abs(values[key] - preset.values[key]) < epsilon;
+  });
+}
+
+'''
+if "function validateStoredPresets" not in app:
+    if type_marker not in app:
+        raise SystemExit("Could not find App component insertion point")
+    app = app.replace(type_marker, types_block + type_marker, 1)
+
+state_marker = '  const presetRef = useRef<HTMLDivElement>(null);'
+state_block = r'''  const presetRef = useRef<HTMLDivElement>(null);
+  const [customPresets, setCustomPresets] = useState<StoredPreset[]>([]);
+  const [presetStoreReady, setPresetStoreReady] = useState(false);
+  const [activeCustomId, setActiveCustomId] = useState<string | null>(null);
+  const [saveMode, setSaveMode] = useState(false);
+  const [saveName, setSaveName] = useState("");
+  const [presetNotice, setPresetNotice] = useState("");
+  const [presetBusy, setPresetBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    loadCustomPresets().then((items) => {
+      if (!alive) return;
+      setCustomPresets(validateStoredPresets(items));
+      setPresetStoreReady(true);
+    }).catch(() => {
+      if (!alive) return;
+      setCustomPresets([]);
+      setPresetStoreReady(true);
+      setPresetNotice("Could not read saved presets");
+    });
+    return () => { alive = false; };
+  }, []);'''
+if state_marker in app:
+    app = app.replace(state_marker, state_block, 1)
+elif "const [customPresets, setCustomPresets]" not in app:
+    raise SystemExit("Could not locate preset state insertion point")
+
+old_apply = '''  const applyPreset = (i: number) => {
+    const idx = (i + PRESETS.length) % PRESETS.length;
+    setHeldIdx(idx);
+    const [, vals, curve, osFactor] = PRESETS[idx];
+    for (const [key, v] of Object.entries(vals)) params[key].setScaled(v);
+    curveParam.setScaled(CURVE_CHIPS.findIndex((c) => c.key === curve));
+    osParam.setScaled(OS_FACTORS.indexOf(osFactor as (typeof OS_FACTORS)[number]));
+  };'''
+new_apply = '''  const applyPreset = (i: number) => {
+    const idx = (i + PRESETS.length) % PRESETS.length;
+    setHeldIdx(idx);
+    setActiveCustomId(null);
+    const [, vals, curve, osFactor] = PRESETS[idx];
+    for (const [key, v] of Object.entries(vals)) params[key].setScaled(v);
+    curveParam.setScaled(CURVE_CHIPS.findIndex((c) => c.key === curve));
+    osParam.setScaled(OS_FACTORS.indexOf(osFactor as (typeof OS_FACTORS)[number]));
+  };
+
+  const applyCustomPreset = (preset: StoredPreset) => {
+    for (const key of Object.keys(PARAMS)) params[key].setScaled(preset.values[key]);
+    curveParam.setScaled(CURVE_CHIPS.findIndex((chip) => chip.key === preset.curve));
+    osParam.setScaled(OS_FACTORS.indexOf(preset.osFactor as (typeof OS_FACTORS)[number]));
+    setActiveCustomId(preset.id);
+    setPresetNotice("");
+    setPresetOpen(false);
+  };
+
+  const persistCustomPresets = async (next: StoredPreset[]): Promise<boolean> => {
+    setPresetBusy(true);
+    const ok = await saveCustomPresets(next);
+    if (ok) {
+      setCustomPresets(next);
+      setPresetNotice("Saved on this computer");
+    } else {
+      setPresetNotice("Save failed — presets were not changed");
+    }
+    setPresetBusy(false);
+    return ok;
+  };
+
+  const saveCurrentPreset = async () => {
+    const name = saveName.trim().replace(/\\s+/g, " ").slice(0, 40);
+    if (!name) {
+      setPresetNotice("Enter a preset name");
+      return;
+    }
+    const existing = customPresets.find((preset) => preset.name.toLowerCase() === name.toLowerCase());
+    const saved: StoredPreset = {
+      id: existing?.id ?? (Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 9)),
+      name,
+      values: {
+        drive: driveDb,
+        threshold: thresholdSteps,
+        output: outputDb,
+        monolow: monoLowPos,
+        mix: mixPct,
+      },
+      curve: curveKey,
+      osFactor,
+    };
+    if (customPresets.length >= 64 && !existing) {
+      setPresetNotice("Preset limit reached (64)");
+      return;
+    }
+    const next = existing
+      ? customPresets.map((preset) => preset.id === existing.id ? saved : preset)
+      : [...customPresets, saved];
+    if (await persistCustomPresets(next)) {
+      setActiveCustomId(saved.id);
+      setSaveName("");
+      setSaveMode(false);
+      setPresetNotice("Saved on this computer");
+    }
+  };
+
+  const deleteCustomPreset = async (preset: StoredPreset) => {
+    const next = customPresets.filter((item) => item.id !== preset.id);
+    if (await persistCustomPresets(next) && activeCustomId === preset.id)
+      setActiveCustomId(null);
+  };'''
+if old_apply in app:
+    app = app.replace(old_apply, new_apply, 1)
+elif "const applyCustomPreset" not in app:
+    raise SystemExit("Could not locate factory preset apply function")
+
+old_match = '''  const matchedIdx = matchPreset(
+    { drive: driveDb, threshold: thresholdSteps, output: outputDb, monolow: monoLowPos, mix: mixPct },
+    curveKey,
+    osFactor,
+    heldIdx
+  );
+  const presetName = matchedIdx >= 0 ? PRESETS[matchedIdx][0] : "CUSTOM";'''
+new_match = '''  const currentValues = {
+    drive: driveDb, threshold: thresholdSteps, output: outputDb, monolow: monoLowPos, mix: mixPct,
+  };
+  const matchedIdx = matchPreset(currentValues, curveKey, osFactor, heldIdx);
+  const matchingCustomPresets = customPresets.filter((preset) =>
+    storedPresetMatches(preset, currentValues, curveKey, osFactor)
+  );
+  const matchedCustom = matchingCustomPresets.find((preset) => preset.id === activeCustomId)
+    ?? matchingCustomPresets[0]
+    ?? null;
+  const presetName = matchedIdx >= 0 ? PRESETS[matchedIdx][0] : (matchedCustom?.name ?? "CUSTOM");'''
+if old_match in app:
+    app = app.replace(old_match, new_match, 1)
+elif "const matchingCustomPresets" not in app:
+    raise SystemExit("Could not locate preset matching block")
+
+old_menu = '''            <div className="preset-menu" role="menu" aria-label="Presets">
+              {PRESETS.map(([name], i) => (
+                <button
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={i === matchedIdx}
+                  className={i === matchedIdx ? "selected" : ""}
+                  key={name + i}
+                  onClick={() => {
+                    applyPreset(i);
+                    setPresetOpen(false);
+                  }}
+                >
+                  <span>{name}</span>{i === matchedIdx && <span className="preset-check" aria-hidden="true">✓</span>}
+                </button>
+              ))}
+            </div>'''
+new_menu = '''            <div className="preset-menu" role="menu" aria-label="Presets">
+              <div className="preset-section-title">FACTORY</div>
+              {PRESETS.map(([name], i) => (
+                <button
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={i === matchedIdx}
+                  className={i === matchedIdx ? "selected" : ""}
+                  key={name + i}
+                  onClick={() => {
+                    applyPreset(i);
+                    setPresetNotice("");
+                    setPresetOpen(false);
+                  }}
+                >
+                  <span>{name}</span>{i === matchedIdx && <span className="preset-check" aria-hidden="true">✓</span>}
+                </button>
+              ))}
+              <div className="preset-section-title custom-title">SAVED ON THIS COMPUTER</div>
+              {!presetStoreReady && <div className="preset-empty">Loading saved presets…</div>}
+              {presetStoreReady && customPresets.length === 0 && <div className="preset-empty">No custom presets yet</div>}
+              {customPresets.map((preset) => (
+                <div className="preset-custom-row" key={preset.id}>
+                  <button
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={matchedCustom?.id === preset.id}
+                    className={matchedCustom?.id === preset.id ? "selected" : ""}
+                    onClick={() => applyCustomPreset(preset)}
+                  >
+                    <span>{preset.name}</span>{matchedCustom?.id === preset.id && <span className="preset-check" aria-hidden="true">✓</span>}
+                  </button>
+                  <button
+                    type="button"
+                    className="preset-delete"
+                    title={"Delete " + preset.name}
+                    aria-label={"Delete " + preset.name}
+                    disabled={presetBusy}
+                    onClick={() => deleteCustomPreset(preset)}
+                  >×</button>
+                </div>
+              ))}
+              {!saveMode ? (
+                <button
+                  type="button"
+                  className="preset-save-action"
+                  disabled={presetBusy}
+                  onClick={() => { setSaveMode(true); setSaveName(presetName === "CUSTOM" ? "" : presetName); setPresetNotice(""); }}
+                >+ SAVE CURRENT AS…</button>
+              ) : (
+                <form
+                  className="preset-save-form"
+                  onSubmit={(event) => { event.preventDefault(); void saveCurrentPreset(); }}
+                >
+                  <input
+                    type="text"
+                    aria-label="Custom preset name"
+                    placeholder="Preset name"
+                    maxLength={40}
+                    value={saveName}
+                    autoFocus
+                    onChange={(event) => setSaveName(event.target.value)}
+                  />
+                  <div className="preset-save-buttons">
+                    <button type="submit" disabled={presetBusy}>{presetBusy ? "SAVING…" : "SAVE"}</button>
+                    <button type="button" disabled={presetBusy} onClick={() => { setSaveMode(false); setPresetNotice(""); }}>CANCEL</button>
+                  </div>
+                </form>
+              )}
+              {!!presetNotice && <div className="preset-notice" role="status">{presetNotice}</div>}
+            </div>'''
+if old_menu in app:
+    app = app.replace(old_menu, new_menu, 1)
+elif "preset-save-form" not in app:
+    raise SystemExit("Could not find existing preset menu markup")
+app_path.write_text(app)
+
+print("Added persistent custom preset storage and dropdown save/load/delete UI.")
+
 print("Applied Mojave WebView diagnostics, safe ResizeObserver fallback, and Safari 14.1 build target.")
