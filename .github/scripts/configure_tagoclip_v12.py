@@ -91,18 +91,22 @@ if 'aria-label="Save current settings as a named preset"' not in save_button:
         1
     )
 a = a[:button_match.start()] + save_button + a[button_match.end():]
-old_form = '<form className="preset-save-form" onSubmit={(event) => { event.preventDefault(); void saveCurrentPreset(); }}>'
-new_form = '<form className="preset-save-form" onKeyDown={(event) => event.stopPropagation()} onKeyUp={(event) => event.stopPropagation()} onSubmit={(event) => { event.preventDefault(); void saveCurrentPreset(); }}>'
-if old_form in a:
-    a = a.replace(old_form, new_form, 1)
-elif 'className="preset-save-form" onKeyDown=' not in a:
-    raise SystemExit("Could not isolate keyboard shortcuts inside the preset form")
-old_input = 'value={saveName} autoFocus onChange={(event) => setSaveName(event.target.value)} />'
-new_input = 'value={saveName} autoFocus\n                    onKeyDown={(event) => event.stopPropagation()}\n                    onKeyUp={(event) => event.stopPropagation()}\n                    onChange={(event) => setSaveName(event.target.value)} />'
-if old_input in a:
-    a = a.replace(old_input, new_input, 1)
-elif 'onKeyDown={(event) => event.stopPropagation()}' not in a:
-    raise SystemExit("Could not route Spacebar and keyboard events inside save-name input")
+# Do not let the global REAPER spacebar shortcut consume spaces in the preset name.
+form_match = re.search(r'<form\b(?=[^>]*className="preset-save-form")[^>]*>', a)
+if not form_match:
+    raise SystemExit("Could not find V1.2 preset-name form")
+form_tag = form_match.group(0)
+if "onKeyDown=" not in form_tag:
+    form_tag = form_tag[:-1] + ' onKeyDown={(event) => event.stopPropagation()} onKeyUp={(event) => event.stopPropagation()}>'
+    a = a[:form_match.start()] + form_tag + a[form_match.end():]
+input_match = re.search(r'<input\b(?=[^>]*aria-label="Custom preset name")[^>]*/?>', a)
+if not input_match:
+    raise SystemExit("Could not find V1.2 preset-name input")
+input_tag = input_match.group(0)
+if "onKeyDown=" not in input_tag:
+    insert = ' onKeyDown={(event) => event.stopPropagation()} onKeyUp={(event) => event.stopPropagation()}'
+    input_tag = input_tag[:-2] + insert + " />" if input_tag.endswith(" />") else input_tag[:-1] + insert + ">"
+    a = a[:input_match.start()] + input_tag + a[input_match.end():]
 app_path.write_text(a, encoding="utf-8")
 
 # Browser preview storage is version specific; real plugin storage is file-backed.
