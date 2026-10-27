@@ -1,5 +1,10 @@
 name: Build TagoClip for Mojave
 
+# A newer source push supersedes a stale build on the same branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   workflow_dispatch:
   push:
