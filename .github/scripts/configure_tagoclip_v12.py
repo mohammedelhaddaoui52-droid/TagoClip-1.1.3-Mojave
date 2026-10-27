@@ -40,13 +40,16 @@ cmake_path.write_text(c, encoding="utf-8")
 build_path = root / "scripts/build_mojave.sh"
 b = build_path.read_text(encoding="utf-8")
 b = b.replace("# Build TagoClip 1.1.3 for Intel x86_64", "# Build TagoClip V1.2 for Intel x86_64", 1)
+# Limit build concurrency on hosted Intel runners to avoid memory pressure/stalls.
+b = b.replace('-j "$(sysctl -n hw.ncpu)"', '-j 4', 1)
+
 b = b.replace("--target TagoClip_VST3 TagoClip_AU", "--target TagoClipV12_VST3 TagoClipV12_AU", 1)
 b = b.replace('ART="$ROOT/build-mojave/TagoClip_artefacts/Release"', 'ART="$ROOT/build-mojave/TagoClipV12_artefacts/Release"', 1)
 b = b.replace('VST3="$ART/VST3/TagoClip.vst3"', 'VST3="$ART/VST3/TagoClip V1.2.vst3"', 1)
 b = b.replace('AU="$ART/AU/TagoClip.component"', 'AU="$ART/AU/TagoClip V1.2.component"', 1)
 b = b.replace('BIN="$BUNDLE/Contents/MacOS/TagoClip"\n    [[ -f "$BIN" ]] || fail "Plugin executable missing: $BIN"',
               'BIN="$(find "$BUNDLE/Contents/MacOS" -maxdepth 1 -type f -print -quit)"\n    [[ -n "$BIN" && -f "$BIN" ]] || fail "Plugin executable missing in: $BUNDLE/Contents/MacOS"', 1)
-if "TagoClipV12_VST3 TagoClipV12_AU" not in b or "TagoClip V1.2.vst3" not in b:
+if "TagoClipV12_VST3 TagoClipV12_AU" not in b or "TagoClip V1.2.vst3" not in b or "-j 4" not in b:
     raise SystemExit("Could not fully update V1.2 build paths")
 build_path.write_text(b, encoding="utf-8")
 
