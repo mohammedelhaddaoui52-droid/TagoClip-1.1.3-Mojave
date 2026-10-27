@@ -533,7 +533,7 @@ old_handlers = '''  const onPointerDown = (e: React.PointerEvent) => {
   const onPointerMove = (e: React.PointerEvent) => {
     if (!(e.target as Element).hasPointerCapture?.(e.pointerId)) return;
     const fine = e.shiftKey;
-    const px = fine ? 900 : 220; // pixels for full sweep
+    const px = fine ? 900 : 160; // pixels for full sweep
     // Drag in knob space, not in value space, so the two halves of a centred
     // knob each get half the travel. Identical to before for linear knobs.
     const moved = toNorm(drag.current.startVal) + (drag.current.startY - e.clientY) / px;
@@ -582,7 +582,7 @@ new_handlers = '''  const onMouseDown = (e: React.MouseEvent<HTMLDivElement>) =>
         const touch = event.touches.item(i);
         if (!touch || touch.identifier !== touchId) continue;
         event.preventDefault();
-        const moved = toNorm(drag.current.startVal) + (drag.current.startY - touch.clientY) / 220;
+        const moved = toNorm(drag.current.startVal) + (drag.current.startY - touch.clientY) / 160;
         set(fromNorm(Math.min(1, Math.max(0, moved))), false);
         break;
       }
@@ -860,7 +860,45 @@ if refinement_marker not in css:
 .meter-label {
   white-space: nowrap;
   font-size: 8px;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.10em;
+}
+/* Separate all four control blocks and make active drag state unmistakable. */
+.knob-col {
+  gap: 20px;
+}
+.stack {
+  gap: 14px;
+}
+.stack #monolow {
+  margin-top: 30px;
+}
+.knob-unit.dragging .knob-label,
+.knob-unit.dragging .knob-value {
+  color: var(--accent) !important;
+}
+.header-mix .knob-unit.dragging .knob-label,
+.header-mix .knob-unit.dragging .knob-value {
+  color: var(--accent) !important;
+}
+/* Allocate real width for the two meter captions instead of letting their glyphs collide. */
+.meter-unit {
+  width: 100%;
+  min-width: 58px;
+}
+.meter-pair {
+  width: 100%;
+  gap: 18px;
+  justify-content: center;
+}
+.meter-col {
+  flex: 0 0 20px;
+  min-width: 20px;
+}
+.meter-label {
+  width: 100%;
+  text-align: center;
+  white-space: nowrap;
+  letter-spacing: 0.08em;
 }
 '''
     css_path.write_text(css)
