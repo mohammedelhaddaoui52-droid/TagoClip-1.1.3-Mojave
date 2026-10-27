@@ -2,6 +2,7 @@
 """Configure an isolated TagoClip V1.2 product from the prepared Mojave source."""
 from pathlib import Path
 import json
+import re
 import sys
 
 root = Path(sys.argv[1]).resolve()
