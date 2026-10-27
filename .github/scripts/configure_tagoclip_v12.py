@@ -78,21 +78,18 @@ app_path = root / "ui/src/App.tsx"
 a = app_path.read_text(encoding="utf-8")
 a = a.replace("Stereo&nbsp;·&nbsp;V1.1", "Stereo&nbsp;·&nbsp;V1.2", 1)
 a = a.replace("SAVED ON THIS COMPUTER", "USER PRESETS", 1)
-old_button = '''<button type="button" className="preset-save-action"
-                  disabled={presetBusy || !presetStoreReady}
-                  onClick={() => { setSaveMode(true); setSaveName(""); setPresetNotice(""); }}>
-                  + SAVE CURRENT AS…
-                </button>'''
-new_button = '''<button type="button" className="preset-save-action"
-                  aria-label="Save current settings as a named preset"
-                  disabled={presetBusy || !presetStoreReady}
-                  onClick={() => { setSaveMode(true); setSaveName(""); setPresetNotice(""); }}>
-                  + SAVE CURRENT AS…
-                </button>'''
-if old_button in a:
-    a = a.replace(old_button, new_button, 1)
-elif 'aria-label="Save current settings as a named preset"' not in a:
-    raise SystemExit("Could not update V1.2 save button")
+button_match = re.search(r'<button\b(?=[^>]*className="preset-save-action")[^>]*>[\s\S]*?</button>', a)
+if not button_match:
+    raise SystemExit("Could not find the V1.2 save-preset button")
+save_button = button_match.group(0)
+save_button = re.sub(r'\s+title="[^"]*"', "", save_button)
+if 'aria-label="Save current settings as a named preset"' not in save_button:
+    save_button = save_button.replace(
+        'className="preset-save-action"',
+        'className="preset-save-action" aria-label="Save current settings as a named preset"',
+        1
+    )
+a = a[:button_match.start()] + save_button + a[button_match.end():]
 old_form = '<form className="preset-save-form" onSubmit={(event) => { event.preventDefault(); void saveCurrentPreset(); }}>'
 new_form = '<form className="preset-save-form" onKeyDown={(event) => event.stopPropagation()} onKeyUp={(event) => event.stopPropagation()} onSubmit={(event) => { event.preventDefault(); void saveCurrentPreset(); }}>'
 if old_form in a:
