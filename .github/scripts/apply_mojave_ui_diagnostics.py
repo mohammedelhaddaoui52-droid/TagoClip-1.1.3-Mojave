@@ -624,6 +624,48 @@ if "onPointerMove={onPointerMove}" in knob:
     raise SystemExit("Knob pointer event props were not fully replaced")
 knob_path.write_text(knob)
 
+# Keep the compact header mix percentage highlighted for the entire drag
+# gesture, then restore the idle grey state on mouse/touch release.
+knob = knob_path.read_text()
+value_state = '  const [value, setValue] = useState(param.getScaled());'
+drag_state = value_state + '\n  const [isDragging, setIsDragging] = useState(false);'
+if 'const [isDragging, setIsDragging] = useState(false);' not in knob:
+    if value_state not in knob:
+        raise SystemExit("Could not locate knob value state for drag highlighting")
+    knob = knob.replace(value_state, drag_state, 1)
+
+mouse_start = 'drag.current = { startY: e.clientY, startVal: value, active: true };\n    param.dragStarted();'
+if mouse_start in knob:
+    knob = knob.replace(mouse_start, 'drag.current = { startY: e.clientY, startVal: value, active: true };\n    setIsDragging(true);\n    param.dragStarted();', 1)
+elif 'setIsDragging(true);' not in knob:
+    raise SystemExit("Could not locate mouse drag start for highlight state")
+
+touch_start = 'drag.current = { startY: first.clientY, startVal: value, active: true };\n    const touchId = first.identifier;'
+if touch_start in knob:
+    knob = knob.replace(touch_start, 'drag.current = { startY: first.clientY, startVal: value, active: true };\n    setIsDragging(true);\n    const touchId = first.identifier;', 1)
+elif knob.count("setIsDragging(true);") < 2:
+    raise SystemExit("Could not locate touch drag start for highlight state")
+
+mouse_finish = 'drag.current.active = false;\n      window.removeEventListener("mousemove", onMove);'
+if mouse_finish in knob:
+    knob = knob.replace(mouse_finish, 'drag.current.active = false;\n      setIsDragging(false);\n      window.removeEventListener("mousemove", onMove);', 1)
+elif 'setIsDragging(false);' not in knob:
+    raise SystemExit("Could not locate mouse drag finish for highlight state")
+
+touch_finish = 'drag.current.active = false;\n          window.removeEventListener("touchmove", onMove);'
+if touch_finish in knob:
+    knob = knob.replace(touch_finish, 'drag.current.active = false;\n          setIsDragging(false);\n          window.removeEventListener("touchmove", onMove);', 1)
+elif knob.count("setIsDragging(false);") < 2:
+    raise SystemExit("Could not locate touch drag finish for highlight state")
+
+old_class = '      className="knob-unit"\n      id={spec.label}'
+new_class = '      className={"knob-unit" + (isDragging ? " dragging" : "")}\n      id={spec.label}'
+if old_class in knob:
+    knob = knob.replace(old_class, new_class, 1)
+elif 'className={"knob-unit" + (isDragging ? " dragging" : "")}' not in knob:
+    raise SystemExit("Could not locate knob root class for drag highlighting")
+knob_path.write_text(knob)
+
 # CSS overrides keep the fixed design canvas but prevent flex shrink/overlap.
 css_path = root / "ui/src/App.css"
 css = css_path.read_text()
@@ -775,6 +817,51 @@ header {
   pointer-events: none;
 }
 .knob-unit { touch-action: none; -webkit-user-select: none; user-select: none; }
+'''
+    css_path.write_text(css)
+
+# Additional spacing/drag-state refinements requested after the Mojave UI became functional.
+css_path = root / "ui/src/App.css"
+css = css_path.read_text()
+refinement_marker = "Mojave refinement 2: stable mix drag highlight and separated labels"
+if refinement_marker not in css:
+    css += r'''
+/* Mojave refinement 2: stable mix drag highlight and separated labels. */
+/* The mix value lights only while actively dragging; hover alone does not latch it. */
+.header-right {
+  gap: 12px;
+}
+.header-meta {
+  margin-right: 4px;
+  flex-shrink: 0;
+}
+.header-mix .knob-unit {
+  gap: 6px;
+}
+.header-mix .knob-unit:hover:not(.dragging) .knob-value {
+  color: var(--dim);
+}
+.header-mix .knob-unit.dragging .knob-value {
+  color: var(--accent);
+}
+/* Give the narrow input/output labels independent horizontal space. */
+.meter-unit {
+  width: 100%;
+  min-width: 0;
+}
+.meter-pair {
+  width: 100%;
+  justify-content: center;
+  gap: 14px;
+}
+.meter-col {
+  flex: 0 0 auto;
+}
+.meter-label {
+  white-space: nowrap;
+  font-size: 8px;
+  letter-spacing: 0.12em;
+}
 '''
     css_path.write_text(css)
 
