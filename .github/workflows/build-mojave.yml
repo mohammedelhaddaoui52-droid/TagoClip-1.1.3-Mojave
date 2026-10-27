@@ -76,10 +76,10 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/dist"
           ditto -c -k --sequesterRsrc --keepParent \
             "build-mojave/TagoClipV12_artefacts/Release/VST3/TagoClip V1.2.vst3" \
-            $GITHUB_WORKSPACE/dist/TagoClip-V1.2-VST3-Mojave-Intel.zip"
+            "$GITHUB_WORKSPACE/dist/TagoClip-V1.2-VST3-Mojave-Intel.zip"
           ditto -c -k --sequesterRsrc --keepParent \
             "build-mojave/TagoClipV12_artefacts/Release/AU/TagoClip V1.2.component" \
-            $GITHUB_WORKSPACE/dist/TagoClip-V1.2-AU-Mojave-Intel.zip"
+            "$GITHUB_WORKSPACE/dist/TagoClip-V1.2-AU-Mojave-Intel.zip"
 
       - name: Upload compiled plugins
         uses: actions/upload-artifact@v4
