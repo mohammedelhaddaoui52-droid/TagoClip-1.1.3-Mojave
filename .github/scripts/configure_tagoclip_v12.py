@@ -333,10 +333,12 @@ function Meters({
   const levelSerial = useRef(0);
   const meterStates = useRef<{ in: MeterState | null; out: MeterState | null }>({ in: null, out: null });
   const resetSerial = useRef({ in: 0, out: 0, gr: 0 });
+  const resetBaseline = useRef({ in: 0, out: 0, gr: 0 });
   const stateRef = useRef({ bypassed, driveDb, thresholdSteps, outputDb });
   stateRef.current = { bypassed, driveDb, thresholdSteps, outputDb };
 
   const resetMeter = (kind: MeterKind) => {
+    resetBaseline.current[kind] = levelSerial.current;
     levels.current[kind] = 0;
     resetSerial.current[kind] += 1;
     if (kind === "in" || kind === "out") {
@@ -379,33 +381,36 @@ function Meters({
         seenReset.in = serial.in;
         shownIn = 0;
         mIn.peak = 0; mIn.age = 0;
-        levels.current.in = 0;
       }
       if (seenReset.out !== serial.out) {
         seenReset.out = serial.out;
         shownOut = 0;
         mOut.peak = 0; mOut.age = 0;
-        levels.current.out = 0;
       }
       if (seenReset.gr !== serial.gr) {
         seenReset.gr = serial.gr;
         shownGrDb = 0;
-        levels.current.gr = 0;
       }
 
       if (inJuce) {
-        const freshLevels = levelSerial.current !== seenLevelSerial;
-        seenLevelSerial = levelSerial.current;
-        const rawIn = Math.max(0, levels.current.in);
-        const rawOut = Math.max(0, levels.current.out);
+        const currentSerial = levelSerial.current;
+        const freshLevels = currentSerial !== seenLevelSerial;
+        seenLevelSerial = currentSerial;
+        const inputSampleIsNew = currentSerial > resetBaseline.current.in;
+        const outputSampleIsNew = currentSerial > resetBaseline.current.out;
+        const grSampleIsNew = currentSerial > resetBaseline.current.gr;
+        const rawIn = inputSampleIsNew ? Math.max(0, levels.current.in) : 0;
+        const rawOut = outputSampleIsNew ? Math.max(0, levels.current.out) : 0;
         shownIn = ballistics(shownIn, Math.min(1, rawIn));
         shownOut = ballistics(shownOut, Math.min(1, rawOut));
-        drawMeter(mIn, shownIn, freshLevels ? rawIn : -1);
-        drawMeter(mOut, shownOut, freshLevels ? rawOut : -1);
+        drawMeter(mIn, shownIn, freshLevels && inputSampleIsNew ? rawIn : -1);
+        drawMeter(mOut, shownOut, freshLevels && outputSampleIsNew ? rawOut : -1);
 
-        // The GR meter uses the same processor reading and attack/release
-        // coefficients as the transfer-curve GR readout.
-        const grTarget = stateRef.current.bypassed ? 0 : Math.min(0, levels.current.gr);
+        // Single GR source: the native processor's last-block dB reading.
+        // Use the same 0.6 attack / 0.06 release smoothing as the former
+        // scope-corner readout so the bar/value preserve its exact metric.
+        const grTarget = stateRef.current.bypassed || !grSampleIsNew
+          ? 0 : Math.min(0, levels.current.gr);
         shownGrDb += (grTarget - shownGrDb) * (grTarget < shownGrDb ? 0.6 : 0.06);
       } else {
         const { bypassed: byp, driveDb: drive, thresholdSteps: steps, outputDb: output } = stateRef.current;
@@ -491,6 +496,58 @@ export default memo(Meters, (prev, next) => {
 '''
 meters_path.write_text(meters_content, encoding="utf-8")
 
+# The dedicated GR meter is now the only numeric GR display in V1.2.
+app_path = root / "ui/src/App.tsx"
+a = app_path.read_text(encoding="utf-8")
+a = a.replace('import GrReadout from "./GrReadout";\n', "", 1)
+a = a.replace('            <GrReadout bypassed={bypassed} driveDb={driveDb} thresholdSteps={thresholdSteps} />\n', "", 1)
+
+# Use the threshold knob's current frame value for the curve immediately,
+# without waiting for the asynchronous JUCE valueChangedEvent round-trip.
+old_threshold = '  const thresholdSteps = useScaled(params.threshold);'
+new_threshold = '''  const thresholdFromHost = useScaled(params.threshold);
+  const [thresholdOptimistic, setThresholdOptimistic] = useState<number | null>(null);
+  const [thresholdIsDragging, setThresholdIsDragging] = useState(false);
+  const thresholdSteps = thresholdOptimistic ?? thresholdFromHost;
+  useEffect(() => {
+    if (!thresholdIsDragging && thresholdOptimistic !== null
+        && Math.round(thresholdFromHost) === Math.round(thresholdOptimistic))
+      setThresholdOptimistic(null);
+  }, [thresholdFromHost, thresholdOptimistic, thresholdIsDragging]);'''
+if old_threshold in a:
+    a = a.replace(old_threshold, new_threshold, 1)
+elif 'const thresholdFromHost = useScaled(params.threshold);' not in a:
+    raise SystemExit("Could not add optimistic threshold state")
+
+factory_from = '''    const [, vals, curve, osFactor] = PRESETS[idx];
+    for (const [key, v] of Object.entries(vals)) params[key].setScaled(v);'''
+factory_to = '''    const [, vals, curve, osFactor] = PRESETS[idx];
+    setThresholdOptimistic(vals.threshold);
+    setThresholdIsDragging(false);
+    for (const [key, v] of Object.entries(vals)) params[key].setScaled(v);'''
+if factory_from in a:
+    a = a.replace(factory_from, factory_to, 1)
+custom_from = '''  const applyCustomPreset = (preset: StoredPreset) => {
+    for (const key of Object.keys(PARAMS)) params[key].setScaled(preset.values[key]);'''
+custom_to = '''  const applyCustomPreset = (preset: StoredPreset) => {
+    setThresholdOptimistic(preset.values.threshold);
+    setThresholdIsDragging(false);
+    for (const key of Object.keys(PARAMS)) params[key].setScaled(preset.values[key]);'''
+if custom_from in a:
+    a = a.replace(custom_from, custom_to, 1)
+knob_from = '<Knob spec={PARAMS.threshold} param={params.threshold} />'
+knob_to = '''<Knob spec={PARAMS.threshold} param={params.threshold}
+            onValueChange={setThresholdOptimistic}
+            onDragStateChange={setThresholdIsDragging} />'''
+if knob_from in a:
+    a = a.replace(knob_from, knob_to, 1)
+elif 'onValueChange={setThresholdOptimistic}' not in a:
+    raise SystemExit("Could not wire the threshold knob to live curve updates")
+if "<GrReadout" in a or 'import GrReadout from "./GrReadout";' in a:
+    raise SystemExit("Duplicate scope GR metric remains")
+app_path.write_text(a, encoding="utf-8")
+
+
 # Make the knob's visual position update on the input event immediately while
 # limiting host relay writes to at most one per display frame. This keeps the
 # UI responsive without queuing redundant JUCE parameter messages.
@@ -499,6 +556,13 @@ knob = knob_path.read_text(encoding="utf-8")
 knob = knob.replace('import { useEffect, useMemo, useRef, useState } from "react";',
                     'import { memo, useEffect, useMemo, useRef, useState } from "react";', 1)
 knob = knob.replace("export default function Knob(", "function Knob(", 1)
+const oldKnobSignature = "function Knob({ spec, param }: { spec: ParamSpec; param: ParamHandle }) {";
+const newKnobSignature = "function Knob({ spec, param, onValueChange, onDragStateChange }: { spec: ParamSpec; param: ParamHandle; onValueChange?: (value: number) => void; onDragStateChange?: (active: boolean) => void }) {";
+if (knob.includes(oldKnobSignature))
+  knob = knob.replace(oldKnobSignature, newKnobSignature, 1);
+else if (!knob.includes("onValueChange, onDragStateChange"))
+  raise SystemExit("Could not extend Knob props for live threshold graph updates");
+
 old_commit = '''  const commitValue = (v: number, fine: boolean) => {
     v = Math.min(spec.max, Math.max(spec.min, v));
     if (spec.step) v = Math.round(v / spec.step) * spec.step;
@@ -528,6 +592,7 @@ new_commit = '''  const normaliseValue = (v: number, fine: boolean) => {
   const commitValue = (v: number, fine: boolean, updateLocal = true) => {
     v = normaliseValue(v, fine);
     if (updateLocal) setValue(v);
+    onValueChange?.(v);
     if (Math.abs(v - lastCommitted.current) < 1e-7) return;
     lastCommitted.current = v;
     param.setScaled(v);
@@ -555,6 +620,23 @@ knob = knob.replace("if (pending) commitValue(pending.value, pending.fine);",
                     "if (pending) commitValue(pending.value, pending.fine, false);", 1)
 if "export default memo(Knob);" not in knob:
     knob += "\n\nexport default memo(Knob);\n"
+# Forward threshold drag state so the optimistic curve value is kept until host acknowledgement.
+mouse_start = 'drag.current = { startY: e.clientY, startVal: value, active: true };\n    setIsDragging(true);\n    param.dragStarted();'
+if mouse_start in knob:
+    knob = knob.replace(mouse_start,
+        'drag.current = { startY: e.clientY, startVal: value, active: true };\n    setIsDragging(true);\n    onDragStateChange?.(true);\n    param.dragStarted();', 1)
+touch_start = 'drag.current = { startY: first.clientY, startVal: value, active: true };\n    setIsDragging(true);\n    const touchId = first.identifier;'
+if touch_start in knob:
+    knob = knob.replace(touch_start,
+        'drag.current = { startY: first.clientY, startVal: value, active: true };\n    setIsDragging(true);\n    onDragStateChange?.(true);\n    const touchId = first.identifier;', 1)
+mouse_finish = 'drag.current.active = false;\n      setIsDragging(false);\n      window.removeEventListener("mousemove", onMove);'
+if mouse_finish in knob:
+    knob = knob.replace(mouse_finish,
+        'drag.current.active = false;\n      setIsDragging(false);\n      onDragStateChange?.(false);\n      window.removeEventListener("mousemove", onMove);', 1)
+touch_finish = 'drag.current.active = false;\n          setIsDragging(false);\n          window.removeEventListener("touchmove", onMove);'
+if touch_finish in knob:
+    knob = knob.replace(touch_finish,
+        'drag.current.active = false;\n          setIsDragging(false);\n          onDragStateChange?.(false);\n          window.removeEventListener("touchmove", onMove);', 1)
 knob_path.write_text(knob, encoding="utf-8")
 
 # Keep the curved transfer scope from rebuilding 160-point SVG strings for
@@ -617,11 +699,11 @@ css += r'''
   flex-direction: row;
   align-items: stretch;
   justify-content: center;
-  gap: 17px;
+  gap: 22px;
 }
 .meter-col, .gr-meter-col {
-  flex: 0 0 24px;
-  min-width: 24px;
+  flex: 0 0 20px;
+  min-width: 20px;
   min-height: 0;
   height: 100%;
   display: flex;
@@ -633,8 +715,8 @@ css += r'''
   appearance: none;
   -webkit-appearance: none;
   flex: 0 0 12px;
-  width: 48px;
-  min-width: 48px;
+  width: 38px;
+  min-width: 38px;
   height: 12px;
   min-height: 12px;
   margin: 0 0 8px;
@@ -643,7 +725,7 @@ css += r'''
   border-radius: 0;
   background: transparent;
   color: var(--accent);
-  font: 700 7.5px/12px "Martian Mono", monospace;
+  font: 700 6.5px/12px "Martian Mono", monospace;
   letter-spacing: 0;
   text-align: center;
   white-space: nowrap;
