@@ -91,22 +91,18 @@ if 'aria-label="Save current settings as a named preset"' not in save_button:
         1
     )
 a = a[:button_match.start()] + save_button + a[button_match.end():]
-# Do not let the global REAPER spacebar shortcut consume spaces in the preset name.
-form_match = re.search(r'<form\b(?=[^>]*className="preset-save-form")[^>]*>', a)
-if not form_match:
-    raise SystemExit("Could not find V1.2 preset-name form")
-form_tag = form_match.group(0)
-if "onKeyDown=" not in form_tag:
-    form_tag = form_tag[:-1] + ' onKeyDown={(event) => event.stopPropagation()} onKeyUp={(event) => event.stopPropagation()}>'
-    a = a[:form_match.start()] + form_tag + a[form_match.end():]
-input_match = re.search(r'<input\b(?=[^>]*aria-label="Custom preset name")[^>]*/?>', a)
-if not input_match:
-    raise SystemExit("Could not find V1.2 preset-name input")
-input_tag = input_match.group(0)
-if "onKeyDown=" not in input_tag:
-    insert = ' onKeyDown={(event) => event.stopPropagation()} onKeyUp={(event) => event.stopPropagation()}'
-    input_tag = input_tag[:-2] + insert + " />" if input_tag.endswith(" />") else input_tag[:-1] + insert + ">"
-    a = a[:input_match.start()] + input_tag + a[input_match.end():]
+# Stop bubbling key events from the preset-name input so REAPER's spacebar
+# transport shortcut cannot consume a typed space. Do not modify the form tag:
+# JSX arrow attributes contain "=>" and are not safely parsed by a simple regex.
+input_change = 'onChange={(event) => setSaveName(event.target.value)}'
+if input_change not in a:
+    raise SystemExit("Could not find the preset-name input change handler")
+if 'onKeyDown={(event) => event.stopPropagation()}' not in a[a.find('aria-label="Custom preset name"'):a.find('aria-label="Custom preset name"') + 800]:
+    a = a.replace(
+        input_change,
+        'onKeyDown={(event) => event.stopPropagation()} onKeyUp={(event) => event.stopPropagation()} ' + input_change,
+        1
+    )
 app_path.write_text(a, encoding="utf-8")
 
 # Browser preview storage is version specific; real plugin storage is file-backed.
