@@ -1430,8 +1430,8 @@ fit_pattern = r'    style\.setProperty\("--ui-scale", String\(scale\)\);\n    st
 new_fit_vars = '''    const offsetX = (vw - design.width * scale) / 2;
     const offsetY = (vh - design.height * scale) / 2;
     style.setProperty("--ui-scale", String(scale));
-    style.setProperty("--ui-left", (offsetX / scale) + "px");
-    style.setProperty("--ui-top", (offsetY / scale) + "px");
+    style.setProperty("--ui-left", offsetX + "px");
+    style.setProperty("--ui-top", offsetY + "px");
     style.setProperty("--ui-x", offsetX + "px");
     style.setProperty("--ui-y", offsetY + "px");'''
 fit_match = re.search(fit_pattern, fit)
