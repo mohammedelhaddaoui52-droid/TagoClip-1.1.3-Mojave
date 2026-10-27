@@ -556,12 +556,12 @@ knob = knob_path.read_text(encoding="utf-8")
 knob = knob.replace('import { useEffect, useMemo, useRef, useState } from "react";',
                     'import { memo, useEffect, useMemo, useRef, useState } from "react";', 1)
 knob = knob.replace("export default function Knob(", "function Knob(", 1)
-const oldKnobSignature = "function Knob({ spec, param }: { spec: ParamSpec; param: ParamHandle }) {";
-const newKnobSignature = "function Knob({ spec, param, onValueChange, onDragStateChange }: { spec: ParamSpec; param: ParamHandle; onValueChange?: (value: number) => void; onDragStateChange?: (active: boolean) => void }) {";
-if (knob.includes(oldKnobSignature))
-  knob = knob.replace(oldKnobSignature, newKnobSignature, 1);
-else if (!knob.includes("onValueChange, onDragStateChange"))
-  raise SystemExit("Could not extend Knob props for live threshold graph updates");
+old_knob_signature = "function Knob({ spec, param }: { spec: ParamSpec; param: ParamHandle }) {"
+new_knob_signature = "function Knob({ spec, param, onValueChange, onDragStateChange }: { spec: ParamSpec; param: ParamHandle; onValueChange?: (value: number) => void; onDragStateChange?: (active: boolean) => void }) {"
+if old_knob_signature in knob:
+    knob = knob.replace(old_knob_signature, new_knob_signature, 1)
+elif "onValueChange, onDragStateChange" not in knob:
+    raise SystemExit("Could not extend Knob props for live threshold graph updates")
 
 old_commit = '''  const commitValue = (v: number, fine: boolean) => {
     v = Math.min(spec.max, Math.max(spec.min, v));
